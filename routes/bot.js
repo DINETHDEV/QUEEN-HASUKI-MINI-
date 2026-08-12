@@ -383,9 +383,25 @@ router.post('/disconnect/:id', authenticateToken, async (req, res) => {
         const bot = await Bot.findOne({ id: req.params.id, userId: req.user.id });
         if (!bot) return res.status(404).json({ success: false, message: 'Bot not found' });
 
-        await bot.update({ status: 'disconnected' });
+        // Actually close the live socket, not just update the DB
+        if (global.conn) {
+            try {
+                await global.conn.logout().catch(() => {});
+            } catch (_) {}
+            try {
+                global.conn.ws?.close();
+            } catch (_) {}
+            global.conn = null;
+        }
+
+        // Reset pairing lock if stuck
+        const { disconnectBot } = require('../services/botService');
+        try { await disconnectBot(bot.id); } catch (_) {}
+
+        await bot.update({ status: 'disconnected', pairingCode: null });
 
         if (global.io) {
+            global.io.emit('whatsapp:close');
             global.io.to(`user_${req.user.id}`).emit('bot_status_update', { botId: bot.id, status: 'disconnected' });
         }
 
