@@ -29,6 +29,34 @@ const { sendInteractive, qr } = require('../lib/interactive');
 const activeSockets = new Map();
 const SESSION_BASE_PATH = './auth_info_baileys';
 
+// ── In-memory stats buffer (batch DB writes instead of per-message) ──────────
+let statsBuffer = { messagesReceived: 0, commandsExecuted: 0 };
+let statsFlushTimer = null;
+const STATS_FLUSH_INTERVAL = 15000; // flush every 15 seconds instead of per message
+
+function scheduleStatsFlush(botNumber) {
+    if (statsFlushTimer) return;
+    statsFlushTimer = setTimeout(async () => {
+        statsFlushTimer = null;
+        if (!statsBuffer.messagesReceived && !statsBuffer.commandsExecuted) return;
+        const snap = { ...statsBuffer };
+        statsBuffer = { messagesReceived: 0, commandsExecuted: 0 };
+        try {
+            const bot = await Bot.findOne({ phoneNumber: botNumber });
+            if (bot) {
+                const stats = bot.statistics || {};
+                stats.messagesReceived = (stats.messagesReceived || 0) + snap.messagesReceived;
+                stats.commandsExecuted = (stats.commandsExecuted || 0) + snap.commandsExecuted;
+                await bot.update({ statistics: stats });
+            }
+        } catch (_) {}
+    }, STATS_FLUSH_INTERVAL);
+}
+
+// ── Group metadata cache (avoid repeated network calls) ──────────────────────
+const groupMetaCache = new Map(); // jid → { meta, ts }
+const GROUP_META_TTL = 5 * 60 * 1000; // 5 minutes
+
 // Ensure credentials directory exists
 fs.ensureDirSync(SESSION_BASE_PATH);
 
@@ -138,7 +166,9 @@ const initSocket = async () => {
                 browser: Browsers.macOS('Safari'),
                 auth: state,
                 version,
-                syncFullHistory: true,
+                syncFullHistory: false,       // ⚡ false = faster startup, less memory
+                markOnlineOnConnect: false,    // ⚡ don't spam presence updates
+                generateHighQualityLinkPreview: false, // ⚡ skip link previews
                 tlsAllowInvalidCertificates: true,
                 family: 4
             });
@@ -299,15 +329,9 @@ const setupMessageHandlers = (sock) => {
             const quoted = rawMsg[type]?.contextInfo?.quotedMessage || null;
             const botNumber = sock.user ? sock.user.id.split('@')[0].split(':')[0] : '';
 
-            // Update stats
-            try {
-                const bot = await Bot.findOne({ phoneNumber: botNumber });
-                if (bot) {
-                    const stats = bot.statistics || {};
-                    stats.messagesReceived = (stats.messagesReceived || 0) + 1;
-                    await bot.update({ statistics: stats });
-                }
-            } catch (_) {}
+            // ⚡ Buffered stats — no DB call per message
+            statsBuffer.messagesReceived++;
+            scheduleStatsFlush(botNumber);
 
             // Group metadata
             let groupMetadata = null;
