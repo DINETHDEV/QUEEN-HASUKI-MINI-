@@ -1,195 +1,199 @@
-<!DOCTYPE html>        
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>YouTube Downloader — Premium Neon</title>
-<link rel="icon" href="data:;base64,iVBORw0KGgo=">
+const { cmd } = require('../NovaX_Mini');
+const config = require('../config');
+const yts = require('yt-search');
+const { downloadAudio } = require('../lib/ytmp3');
+const { sendInteractive, qr, url, errMsg } = require('../lib/interactive');
+const { getUserLanguage } = require('../lib/database');
+const { getLang } = require('../lib/lang');
 
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
+// ── Per-language song strings ─────────────────────────────────────────────────
+const SONG_STRINGS = {
+    en: {
+        USAGE:        '❌ Please provide a song name or YouTube URL.\nUsage: .song <name or URL>',
+        NOT_FOUND:    '❌ No results found. Try a different search term.',
+        DOWNLOADER:   'Song Downloader',
+        TITLE_LABEL:  'Title',
+        CHANNEL_LABEL:'Channel',
+        VIEWS_LABEL:  'Views',
+        DURATION_LABEL:'Duration',
+        SELECT_FORMAT:'Choose your download format:',
+        AUDIO_BTN:    '🎵 Audio (MP3)',
+        DOC_BTN:      '📄 Document (MP3)',
+        OPEN_YT_BTN:  '▶️ Open on YouTube',
+        DOWNLOADING:  '⏳ Downloading your audio… Please wait.',
+        FAILED:       '❌ Download failed.',
+    },
+    si: {
+        USAGE:        '❌ කරුණාකර ගීතයේ නම හෝ YouTube URL ලබා දෙන්න.\nඋදාහරණ: .song <නම හෝ URL>',
+        NOT_FOUND:    '❌ ප්‍රතිඵල හමු නොවිණි. වෙනත් සෙවීමක් උත්සාහ කරන්න.',
+        DOWNLOADER:   'ගීත බාගත කිරීම',
+        TITLE_LABEL:  'මාතෘකාව',
+        CHANNEL_LABEL:'නාලිකාව',
+        VIEWS_LABEL:  'දර්ශන',
+        DURATION_LABEL:'කාලසීමාව',
+        SELECT_FORMAT:'ඔබේ ආකෘතිය තෝරන්න:',
+        AUDIO_BTN:    '🎵 ශ්‍රව්‍ය (MP3)',
+        DOC_BTN:      '📄 ලේඛනය (MP3)',
+        OPEN_YT_BTN:  '▶️ YouTube හි විවෘත කරන්න',
+        DOWNLOADING:  '⏳ ශ්‍රව්‍යය බාගත කරමින්… රැඳී සිටින්න.',
+        FAILED:       '❌ බාගත කිරීම අසාර්ථකයි.',
+    }
+};
 
-  :root{
-    --bg:#07070a;
-    --card: rgba(255,255,255,0.03);
-    --accent1: #ff0044;
-    --accent2: #8a00ff;
-    --muted: #bdbdbd;
-  }
-
-  *{box-sizing:border-box}
-  html,body{height:100%; margin:0; font-family:'Poppins',sans-serif; background:
-    radial-gradient(1200px 600px at 10% 10%, rgba(138,0,255,0.06), transparent 8%),
-    radial-gradient(900px 500px at 90% 90%, rgba(255,0,68,0.05), transparent 8%),
-    var(--bg); color:#fff; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;}
-
-  .wrap{width:94%; max-width:980px; margin:40px auto;}
-  @media (max-width:900px){ .wrap{padding-bottom:40px;} }
-
-  .card{
-    background:var(--card);
-    border-radius:14px;
-    padding:20px;
-    border:1px solid rgba(255,0,76,0.12);
-    box-shadow:0 8px 30px rgba(0,0,0,0.6), 0 0 30px rgba(138,0,255,0.04);
-    position:relative;
-    overflow:hidden;
-  }
-
-  header.site {
-    display:flex; gap:12px; align-items:center;
-    margin-bottom:14px;
-  }
-  .logo {
-    width:56px; height:56px; border-radius:12px;
-    display:flex; align-items:center; justify-content:center;
-    background:linear-gradient(135deg,var(--accent1),var(--accent2));
-    box-shadow:0 6px 18px rgba(138,0,255,0.18);
-    font-weight:700; font-size:18px;
-  }
-  .title h1{margin:0; font-size:20px; color:#fff; letter-spacing:0.2px;}
-  .title p{margin:2px 0 0; color:var(--muted); font-size:13px;}
-
-  .searchRow{display:flex; gap:10px; margin-top:6px;}
-  .input{
-    flex:1; display:flex; gap:8px; align-items:center;
-    background:rgba(255,255,255,0.02); border-radius:10px; padding:10px;
-    border:1px solid rgba(255,0,76,0.08);
-  }
-  .input input{
-    background:transparent; border:0; outline:0; color:#fff; width:100%; font-size:15px;
-  }
-  .btn{
-    background:linear-gradient(90deg,var(--accent1),var(--accent2));
-    border:0; padding:10px 14px; border-radius:10px; cursor:pointer; color:#fff;
-    font-weight:600; box-shadow:0 8px 24px rgba(255,0,76,0.12);
-  }
-
-  .results{margin-top:16px; display:flex; flex-direction:column; gap:12px; max-height:70vh; overflow:auto; padding-right:6px;}
-  .resultItem{display:flex; gap:12px; align-items:center; background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent); border-radius:10px; padding:10px; border:1px solid rgba(255,255,255,0.02);}
-  .resultThumb{width:110px; height:62px; border-radius:8px; overflow:hidden; flex-shrink:0; background:#111;}
-  .resultMeta{flex:1}
-  .resultMeta h4{margin:0; font-size:15px; line-height:1.15;}
-  .resultMeta p{margin:6px 0 0; font-size:13px; color:var(--muted);}
-  .resultActions{display:flex; gap:8px; align-items:center;}
-  .smallBtn{padding:8px 10px; border-radius:8px; border:0; cursor:pointer; font-weight:600; font-size:13px;}
-  .smallBtn.mp3{background:linear-gradient(90deg,#00c853,#00e676); color:#030;}
-  .smallBtn.mp4{background:linear-gradient(90deg,#2196f3,#7c4dff); color:#fff;}
-
-  .log{margin-top:14px; font-family:monospace; font-size:13px; color:var(--muted); background:rgba(255,255,255,0.02); padding:10px; border-radius:8px; min-height:46px; overflow:auto;}
-
-  footer.foot{opacity:0.7; margin-top:14px; font-size:13px; color:var(--muted); text-align:center;}
-  .glow{box-shadow:0 8px 36px rgba(138,0,255,0.06), 0 0 30px rgba(255,0,76,0.04);}
-</style>
-</head>
-<body>
-
-<div class="wrap">
-  <div class="card glow">
-    <header class="site">
-      <div class="logo">YT</div>
-      <div class="title">
-        <h1>YouTube Downloader — Premium</h1>
-        <p>Search & download MP3 / MP4 — Dark Neon UI</p>
-      </div>
-    </header>
-
-    <div class="searchRow">
-      <div class="input">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style="opacity:0.8"><path d="M21 21l-4.35-4.35" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <input id="q" placeholder="Search song or paste YouTube URL..." />
-      </div>
-      <button class="btn" id="searchBtn">Search</button>
-    </div>
-
-    <div id="results" class="results" aria-live="polite"></div>
-
-    <div class="log" id="log">Ready…</div>
-    <footer class="foot">© POWERD BY BLACK MATRIX DEV — Developed by Dineth Sudarshana</footer>
-  </div>
-</div>
-
-<script>
-const resultsEl = document.getElementById('results');
-const logEl = document.getElementById('log');
-const qEl = document.getElementById('q');
-const searchBtn = document.getElementById('searchBtn');
-
-function log(msg, err=false){
-  const time = new Date().toLocaleTimeString();
-  logEl.innerText = `[${time}] ${msg}` + (err ? " ⚠️" : "");
+/**
+ * Get song string for a language, falling back to English.
+ * @param {string} lang  Language code
+ * @param {string} key   String key
+ */
+function ts(lang, key) {
+    const map = SONG_STRINGS[(lang || 'en').toLowerCase()] || SONG_STRINGS.en;
+    return map[key] || SONG_STRINGS.en[key] || key;
 }
 
-function sanitizeText(s, max=80){ return s?.length>max ? s.slice(0,max-1)+'…':s; }
+const sendErr = async (conn, mek, from, text) =>
+    conn.sendMessage(from, { text: `╭━━━〔 *❌ ɴᴏᴠᴀ_x ᴍɪɴɪ* 〕━━━┈\n┃ ${text}\n╰━━━━━━━━━━━━━━━┈` }, { quoted: mek });
 
-async function searchYT(query){
-  const api1 = `https://tharuzz-ofc-apis.vercel.app/api/search/ytsearch?query=${encodeURIComponent(query)}`;
-  try{
-    log('Searching...');
-    const res = await fetch(api1);
-    if(!res.ok) throw new Error('API failed');
-    const data = await res.json();
-    if(!data?.result?.length) throw new Error('No results');
-    return data.result.map(item=>(({
-      title: item.title || "Unknown",
-      url: item.url || item.id,
-      thumbnail: item.thumbnail || item.thumb,
-      duration: item.timestamp || item.duration || "Unknown",
-      views: item.views || "N/A",
-      published: item.ago || ""
-    })));
-  }catch(e){ log('Search failed', true); return []; }
+// ==============================
+// MAIN SONG COMMAND (SEARCH)
+// ==============================
 
-function renderResults(list){
-  resultsEl.innerHTML = '';
-  if(!list.length){ resultsEl.innerHTML='<div style="color:var(--muted)">No results found.</div>'; return; }
-  list.forEach((it, idx)=>{
-    const item=document.createElement('div');
-    item.className='resultItem';
-    item.innerHTML=`<div class="resultThumb"><img src="${it.thumbnail}" style="width:100%;height:100%;object-fit:cover"/></div>
-      <div class="resultMeta">
-        <h4 title="${it.title}">${sanitizeText(it.title,80)}</h4>
-        <p>${it.duration} • ${it.views} • ${it.published}</p>
-      </div>
-      <div class="resultActions">
-        <button class="smallBtn mp3" data-idx="${idx}">MP3</button>
-        <button class="smallBtn mp4" data-idx="${idx}">MP4</button>
-      </div>`;
-    resultsEl.appendChild(item);
-  });
+cmd(
+{
+    pattern: 'song',
+    alias: ['play', 'music', 'songdl'],
+    react: '🎵',
+    desc: 'Download YouTube Song',
+    category: 'download',
+    filename: __filename
+},
+async (conn,  mek,  m, { q, from, sender, body }) => {
+    const prefix = config.PREFIX || '.';
 
-  document.querySelectorAll('.smallBtn.mp3').forEach(btn=>{
-    btn.onclick=async ()=>{
-      const v=list[parseInt(btn.dataset.idx)];
-      try{
-        const dl = oceansaverDownload(v.url, 'mp3');
-        const a=document.createElement('a'); a.href=dl; a.download=(v.title||'song')+'.mp3'; a.click();
-        log('MP3 download started.');
-      }catch(e){ log('Download failed',true); }
-    };
-  });
+    let userLang = await getUserLanguage(sender);
+    if (!userLang) userLang = (config.LANGUAGE || 'en').toLowerCase();
 
-  document.querySelectorAll('.smallBtn.mp4').forEach(btn=>{
-    btn.onclick=async ()=>{
-      const v=list[parseInt(btn.dataset.idx)];
-      try{
-        const dl = oceansaverDownload(v.url, 'mp4');
-        const a=document.createElement('a'); a.href=dl; a.download=(v.title||'video')+'.mp4'; a.click();
-        log('MP4 download started.');
-      }catch(e){ log('Download failed',true); }
-    };
-  });
-}
+    if (!q)
+        return sendErr(conn, mek, from, ts(userLang, 'USAGE'));
 
-searchBtn.addEventListener('click',async ()=>{
-  const q=qEl.value.trim(); if(!q) return log('Enter search term or paste YouTube URL!');
-  resultsEl.innerHTML='<div style="color:var(--muted)">Searching…</div>';
-  const list=await searchYT(q);
-  renderResults(list);
+    try {
+        await conn.sendMessage(from, { react: { text: '🔍', key: mek.key } });
+
+        // Support direct YouTube URL or search term
+        let data;
+        if (q.includes('youtube.com') || q.includes('youtu.be')) {
+            const videoId = q.match(/(?:v=|youtu\.be\/)([^&?/]+)/)?.[1] || q;
+            const result = await yts({ videoId });
+            data = result;
+        } else {
+            const result = await yts(q);
+            if (!result.all || !result.all.length)
+                return sendErr(conn, mek, from, ts(userLang, 'NOT_FOUND'));
+            data = result.all[0];
+        }
+
+        if (!data || !data.url)
+            return sendErr(conn, mek, from, ts(userLang, 'NOT_FOUND'));
+
+        const text = `*★ ɴᴏᴠᴀ-x ᴍɪɴɪ — ${ts(userLang, 'DOWNLOADER')} ★*
+
+ 🎵 *${ts(userLang, 'TITLE_LABEL')}:* ${data.title}
+ 👤 *${ts(userLang, 'CHANNEL_LABEL')}:* ${data.author?.name || 'Unknown'}
+ 👁️ *${ts(userLang, 'VIEWS_LABEL')}:* ${data.views || 'N/A'}
+ ⏱️ *${ts(userLang, 'DURATION_LABEL')}:* ${data.timestamp || 'N/A'}
+
+ ────────────────────────
+ 📥 *${ts(userLang, 'SELECT_FORMAT')}*`;
+
+        await sendInteractive(conn, from, mek, {
+            imageUrl: data.thumbnail,
+            title:    '🎵 NovaX Mini',
+            body:     text,
+            footer:   config.BOT_FOOTER,
+            buttons: [
+                qr(ts(userLang, 'AUDIO_BTN'), `${prefix}asong ${data.url}`),
+                qr(ts(userLang, 'DOC_BTN'),   `${prefix}dsong ${data.url}`),
+                url(ts(userLang, 'OPEN_YT_BTN'), data.url)
+            ]
+        });
+
+    } catch (e) {
+        console.error('SONG SEARCH ERROR:', e);
+        await conn.sendMessage(from, { react: { text: '❌', key: mek.key } });
+        return sendErr(conn, mek, from, 'Failed to search YouTube. Please try again.');
+    }
 });
 
-qEl.addEventListener('keydown',e=>{ if(e.key==='Enter') searchBtn.click(); });
-log('Ready. Paste a YouTube link or search a song.');
-</script>
-</body>
-</html>
+// ==============================
+// REUSABLE DOWNLOAD HELPER
+// ==============================
+
+async function handleDownload(conn, mek, from, sender, q, isDocument) {
+    let userLang = await getUserLanguage(sender);
+    if (!userLang) userLang = (config.LANGUAGE || 'en').toLowerCase();
+
+    if (!q || (!q.includes('youtu.be') && !q.includes('youtube.com'))) {
+        return sendErr(conn, mek, from, ts(userLang, 'USAGE'));
+    }
+
+    try {
+        await conn.sendMessage(from, { react: { text: '⬇️', key: mek.key } });
+
+        // Show premium processing message
+        await conn.sendMessage(from, { text: ts(userLang, 'DOWNLOADING') }, { quoted: mek });
+
+        // downloadAudio returns { url, title, duration, thumbnail }
+        const stream = await downloadAudio(q);
+        if (!stream || !stream.url) {
+            throw new Error('API returned no download link.');
+        }
+
+        if (isDocument) {
+            await conn.sendMessage(from, {
+                document: { url: stream.url },
+                mimetype: 'audio/mpeg',
+                fileName: `${stream.title || 'audio'}.mp3`
+            }, { quoted: mek });
+        } else {
+            await conn.sendMessage(from, {
+                audio:    { url: stream.url },
+                mimetype: 'audio/mpeg',
+                ptt:      false
+            }, { quoted: mek });
+        }
+
+        await conn.sendMessage(from, { react: { text: '✅', key: mek.key } });
+
+    } catch (e) {
+        console.error('SONG DOWNLOAD ERROR:', e.message);
+        await conn.sendMessage(from, { react: { text: '❌', key: mek.key } });
+        return sendErr(conn, mek, from, `${ts(userLang, 'FAILED')} (${e.message})`);
+    }
+}
+
+// ==============================
+// AUDIO DOWNLOAD (.asong)
+// ==============================
+
+cmd(
+{
+    pattern: 'asong',
+    dontAddCommandList: true,
+    filename: __filename
+},
+async (conn, mek, m, { q, from, sender }) => {
+    await handleDownload(conn, mek, from, sender, q, false);
+});
+
+// ==============================
+// DOCUMENT DOWNLOAD (.dsong)
+// ==============================
+
+cmd(
+{
+    pattern: 'dsong',
+    dontAddCommandList: true,
+    filename: __filename
+},
+async (conn, mek, m, { q, from, sender }) => {
+    await handleDownload(conn, mek, from, sender, q, true);
+});
