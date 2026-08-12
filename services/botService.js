@@ -1,6 +1,18 @@
 /**
  * Bot Service (Updated for Single-Socket Architecture, @itsliaaa/baileys & MongoDB)
  * Copyright © 2025 DarkSide Developers & Zero Bug Zone
+ *
+ * PAIRING FIX CHANGELOG:
+ *  - Removed non-existent sock.waitForSocketOpen() — was causing hangs/crashes
+ *  - Added waitForWsOpen() — polls sock.ws.readyState with 15s timeout
+ *  - Added per-phone pairingLocks Map (exported for routes)
+ *  - Added pairSuccessNotified flag — pair notification fires exactly once
+ *  - Added sendPairSuccessNotification() — sends to bot's own JID
+ *  - Made connection === 'open' handler non-blocking
+ *  - Moved pluginManager.loadAll() to setImmediate
+ *  - Moved DB updates to setImmediate (fire-and-forget after status broadcast)
+ *  - Added detailed [PAIR] logs with ms timing
+ *  - Exponential backoff on reconnect (5s → 10s → 20s → 40s → 60s max)
  */
 
 'use strict';
@@ -28,6 +40,9 @@ const { sendInteractive, qr } = require('../lib/interactive');
 
 const activeSockets = new Map();
 const SESSION_BASE_PATH = './auth_info_baileys';
+
+// ── Per-phone pairing locks (exported for routes) ─────────────────────────────
+const pairingLocks = new Map(); // phoneNumber → true
 
 // ── In-memory stats buffer (batch DB writes instead of per-message) ──────────
 let statsBuffer = { messagesReceived: 0, commandsExecuted: 0 };
@@ -65,9 +80,24 @@ global.baileys = baileys;
 
 let initPromise = null;
 
+// ── Pair-success notification guard ──────────────────────────────────────────
+// Set to true after the FIRST successful pair. Reset when credentials are cleared.
+let pairSuccessNotified = false;
+
 // ── Connection notification guard ────────────────────────────────────────────
 let lastNotifTime = 0;
 const NOTIF_COOLDOWN_MS = 30 * 1000; // 30 seconds
+
+// ── Reconnect backoff state ───────────────────────────────────────────────────
+let reconnectAttempts = 0;
+const MAX_BACKOFF_MS  = 60 * 1000; // 60 seconds max
+const BASE_BACKOFF_MS = 5  * 1000; // 5 seconds base
+
+function getBackoffMs() {
+    const ms = Math.min(BASE_BACKOFF_MS * Math.pow(2, reconnectAttempts), MAX_BACKOFF_MS);
+    reconnectAttempts++;
+    return ms;
+}
 
 /**
  * Normalise a phone number to WhatsApp JID format.
@@ -76,9 +106,54 @@ const NOTIF_COOLDOWN_MS = 30 * 1000; // 30 seconds
 function normaliseToJid(number) {
     if (!number) return null;
     let n = String(number).replace(/[^0-9]/g, '');
-    // Sri Lanka local 07x -> 947x
+    // Sri Lanka local 07x → 947x
     if (n.startsWith('0') && n.length === 10) n = '94' + n.slice(1);
     return n + '@s.whatsapp.net';
+}
+
+/**
+ * Send a PAIR SUCCESS notification to the bot's own WhatsApp JID.
+ * Called once per fresh pair — NOT on reconnects.
+ * Failures are caught and logged — never bubble up to crash the bot.
+ */
+async function sendPairSuccessNotification(sock) {
+    console.log('[PAIR] Sending success notification...');
+
+    const rawJid   = sock.user?.id || '';
+    // Normalize: "94xxxxxxxxx:xx@s.whatsapp.net" → "94xxxxxxxxx@s.whatsapp.net"
+    const cleanNum = rawJid.split('@')[0].split(':')[0];
+    const targetJid = cleanNum ? cleanNum + '@s.whatsapp.net' : null;
+
+    if (!targetJid) {
+        logger.warn('[PAIR] Cannot send success notification — no user JID available.');
+        return;
+    }
+
+    const botName    = config.BOT_NAME    || 'NovaX Mini';
+    const botVersion = config.BOT_VERSION || '3.0.0';
+    const prefix     = config.PREFIX      || '.';
+
+    const successMessage =
+        `╭───〔 *NOVA X MINI* 〕───╮\n` +
+        `│\n` +
+        `│ ✅ *Pairing Successful!*\n` +
+        `│\n` +
+        `│ 🤖 *Bot:* ${botName}\n` +
+        `│ 🔖 *Version:* v${botVersion}\n` +
+        `│ 📱 *Status:* Connected\n` +
+        `│ ⚡ *Connection:* Active\n` +
+        `│\n` +
+        `│ Your WhatsApp account has\n` +
+        `│ been successfully connected\n` +
+        `│ to ${botName}.\n` +
+        `│\n` +
+        `│ 🔤 *Prefix:* [ ${prefix} ]\n` +
+        `│ 🚀 *Bot is ready to use!*\n` +
+        `│\n` +
+        `╰──────────────────────╯`;
+
+    await sock.sendMessage(targetJid, { text: successMessage });
+    console.log('[PAIR] Success notification sent to:', targetJid);
 }
 
 /**
@@ -140,6 +215,83 @@ async function sendConnectionNotification(sock) {
 }
 
 /**
+ * Wait for the Baileys socket to be ready for pairing code generation.
+ *
+ * @itsliaaa/baileys wraps the WebSocket in a custom class — sock.ws.readyState
+ * does NOT reliably return 1 (OPEN) even when the WS IS open.
+ *
+ * STRATEGY (most-to-least reliable):
+ * 1. If a QR was already emitted, the WS is open — resolve immediately.
+ * 2. Listen for connection.update events (qr / connecting / open) from Baileys.
+ * 3. Poll multiple possible readyState locations as a fallback.
+ * 4. Reject after timeoutMs.
+ */
+function waitForWsReady(sock, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+        const started = Date.now();
+
+        // ── Fast path: QR already emitted means WS is already open ──────────
+        if (global.qrCode) {
+            console.log('[PAIR] WS already ready (QR cached).');
+            return resolve();
+        }
+
+        // ── Helper: check all known WS readyState paths in Baileys forks ────
+        const isOpen = () => {
+            const paths = [
+                sock.ws?.readyState,
+                sock.ws?.socket?.readyState,
+                sock.ws?.conn?.readyState
+            ];
+            return paths.some(rs => rs === 1);
+        };
+
+        if (isOpen()) {
+            console.log('[PAIR] WS already open (readyState check).');
+            return resolve();
+        }
+
+        let resolved = false;
+        function done(err) {
+            if (resolved) return;
+            resolved = true;
+            clearInterval(poll);
+            sock.ev.off('connection.update', onUpdate);
+            if (err) reject(err); else resolve();
+        }
+
+        // ── Primary: Baileys event-based detection ───────────────────────────
+        // 'connecting' = WS handshake done, Baileys is talking to WhatsApp servers
+        // 'qr'         = WS is open, challenge received, pairing code is requestable
+        // 'open'       = fully authenticated (also fine)
+        function onUpdate({ connection, qr: qrData }) {
+            if (qrData) {
+                console.log('[PAIR] WS ready — QR event received.');
+                done();
+            } else if (connection === 'connecting' || connection === 'open') {
+                console.log(`[PAIR] WS ready — connection.update: ${connection}`);
+                done();
+            } else if (connection === 'close') {
+                done(new Error('WS_CLOSED: Socket closed before becoming ready'));
+            }
+        }
+        sock.ev.on('connection.update', onUpdate);
+
+        // ── Fallback: polling in case events were already emitted ─────────────
+        const poll = setInterval(() => {
+            if (global.qrCode || isOpen()) {
+                console.log('[PAIR] WS ready — fallback poll.');
+                done();
+                return;
+            }
+            if (Date.now() - started >= timeoutMs) {
+                done(new Error('WS_NOT_OPEN: Socket did not become ready within ' + timeoutMs + 'ms'));
+            }
+        }, 300);
+    });
+}
+
+/**
  * Initialize and start the single global socket connection
  */
 const initSocket = async () => {
@@ -177,52 +329,85 @@ const initSocket = async () => {
             activeSockets.set('main', sock);
 
             sock.ev.on('connection.update', async (update) => {
-                const { connection, lastDisconnect, qr } = update;
+                const { connection, lastDisconnect, qr: qrData } = update;
 
-                if (qr) {
+                if (qrData) {
                     logger.info('[WhatsApp] New QR generated.');
+                    global.qrCode = qrData;
                     if (global.io) {
-                        global.io.emit('bot_qr', { qr });
-                        global.io.emit('pairing:code', { qr });
+                        global.io.emit('bot_qr', { qr: qrData });
+                        global.io.emit('pairing:code', { qr: qrData });
                     }
                 }
 
                 if (connection === 'connecting') {
+                    console.log('[PAIR] Connection state: connecting');
                     if (global.io) {
                         global.io.emit('whatsapp:connecting');
                     }
                 }
 
                 if (connection === 'open') {
-                    const botJid = sock.user?.id || '';
+                    const connectionStart = Date.now();
+                    const botJid    = sock.user?.id || '';
                     const botNumber = botJid.split('@')[0].split(':')[0];
 
+                    console.log(`[PAIR] Connection opened — bot JID: ${botJid}`);
                     logger.success(`✅ WhatsApp Bot connected successfully! (${botNumber})`);
 
-                    // Update bot status in database
-                    try {
-                        const bot = await Bot.findOne({ phoneNumber: botNumber });
-                        if (bot) {
-                            await bot.update({ status: 'connected', lastSeen: new Date() });
-                            if (global.io) {
-                                global.io.emit('bot_status_update', { botId: bot.id, status: 'connected' });
-                                global.io.emit('pairing:success', { botId: bot.id });
-                            }
-                        }
-                    } catch (dbErr) {
-                        logger.error('DB update failed on connection open:', dbErr.message);
-                    }
-
+                    // ── 1. IMMEDIATELY broadcast connected status ─────────────
                     if (global.io) {
                         global.io.emit('whatsapp:open');
+                        global.io.emit('bot_status_update', { status: 'connected', botNumber });
+                        global.io.emit('pairing:success', { botNumber });
+                    }
+                    console.log('[PAIR] Session marked connected');
+
+                    // Reset reconnect counter on successful open
+                    reconnectAttempts = 0;
+
+                    // ── 2. Pair success notification — exactly once per real pair ──
+                    if (!pairSuccessNotified) {
+                        pairSuccessNotified = true;
+                        console.log('[PAIR] Sending success notification (first pair only)...');
+                        sendPairSuccessNotification(sock)
+                            .then(() => console.log('[PAIR] Success notification sent'))
+                            .catch(err => console.error('[PAIR-NOTIFY]', err.message));
                     }
 
-                    // Load all internal & external plugins
-                    const pluginManager = require('../lib/pluginManager');
-                    await pluginManager.loadAll();
+                    // ── 3. Load plugins async (non-blocking) ─────────────────
+                    setImmediate(async () => {
+                        try {
+                            const pluginManager = require('../lib/pluginManager');
+                            await pluginManager.loadAll();
+                        } catch (pmErr) {
+                            logger.warn('[plugins] Load error:', pmErr.message);
+                        }
+                    });
 
-                    // Send connection notification (non-blocking, with cooldown guard)
+                    // ── 4. Update DB async (non-blocking) ────────────────────
+                    setImmediate(async () => {
+                        try {
+                            const bot = await Bot.findOne({ phoneNumber: botNumber });
+                            if (bot) {
+                                await bot.update({ status: 'connected', lastSeen: new Date() });
+                                if (global.io) {
+                                    global.io.emit('bot_status_update', { botId: bot.id, status: 'connected' });
+                                    global.io.emit('pairing:success', { botId: bot.id });
+                                }
+                            }
+                        } catch (dbErr) {
+                            logger.error('[PAIR] DB update failed on open:', dbErr.message);
+                        }
+                    });
+
+                    // ── 5. Owner connection notification (non-blocking) ───────
                     setImmediate(() => sendConnectionNotification(sock));
+
+                    const elapsed = Date.now() - connectionStart;
+                    console.log(`[PAIR] Connection completed in ${elapsed}ms`);
+                    console.log('[PAIR] Pairing flow completed');
+
                 } else if (connection === 'close') {
                     const statusCode = lastDisconnect?.error?.output?.statusCode;
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
@@ -230,30 +415,43 @@ const initSocket = async () => {
 
                     if (global.io) {
                         global.io.emit('whatsapp:close');
+                        global.io.emit('bot_status_update', {
+                            status: shouldReconnect ? 'connecting' : 'disconnected'
+                        });
                     }
 
-                    // Update bot status in DB
-                    try {
-                        const botJid = sock.user?.id || '';
-                        const botNumber = botJid.split('@')[0].split(':')[0];
-                        const bot = await Bot.findOne({ phoneNumber: botNumber });
-                        if (bot) {
-                            await bot.update({ status: shouldReconnect ? 'connecting' : 'disconnected' });
-                            if (global.io) {
-                                global.io.emit('bot_status_update', { botId: bot.id, status: shouldReconnect ? 'connecting' : 'disconnected' });
+                    // Async DB update on close
+                    setImmediate(async () => {
+                        try {
+                            const botJid   = sock.user?.id || '';
+                            const botNum   = botJid.split('@')[0].split(':')[0];
+                            const bot      = await Bot.findOne({ phoneNumber: botNum });
+                            if (bot) {
+                                await bot.update({ status: shouldReconnect ? 'connecting' : 'disconnected' });
+                                if (global.io) {
+                                    global.io.emit('bot_status_update', {
+                                        botId: bot.id,
+                                        status: shouldReconnect ? 'connecting' : 'disconnected'
+                                    });
+                                }
                             }
+                        } catch (dbErr) {
+                            logger.error('DB update failed on connection close:', dbErr.message);
                         }
-                    } catch (dbErr) {
-                        logger.error('DB update failed on connection close:', dbErr.message);
-                    }
+                    });
 
                     global.conn = null;
                     activeSockets.delete('main');
                     initPromise = null;
 
                     if (shouldReconnect) {
-                        setTimeout(initSocket, 5000);
+                        const backoff = getBackoffMs();
+                        logger.info(`[WhatsApp] Reconnecting in ${backoff / 1000}s (attempt ${reconnectAttempts})...`);
+                        setTimeout(initSocket, backoff);
                     } else {
+                        // Credentials cleared — reset so next real pair sends the notification
+                        pairSuccessNotified = false;
+                        reconnectAttempts   = 0;
                         logger.error('[WhatsApp] Logged out from WhatsApp, delete credentials folder to relogin.');
                     }
                 }
@@ -275,21 +473,36 @@ const initSocket = async () => {
     return initPromise;
 };
 
-// Start a pairing session for a phone number
+/**
+ * Generate a pairing code for a phone number.
+ *
+ * CRITICAL FIX: Removed non-existent sock.waitForSocketOpen().
+ * Replaced with waitForWsReady() which uses Baileys event system
+ * and multiple WS state checks — works reliably with @itsliaaa/baileys.
+ */
 const createBotSession = async (phoneNumber) => {
-    try {
-        const sock = await initSocket();
-        
-        // Wait until the socket is ready for pairing
-        await sock.waitForSocketOpen();
-        
-        // Request the pairing code
-        const code = await sock.requestPairingCode(phoneNumber);
-        return code;
-    } catch (error) {
-        logger.error('Failed to create bot pairing session:', error.message);
-        throw error;
-    }
+    const pairStart = Date.now();
+    console.log(`[PAIR] Request received for: ${phoneNumber}`);
+    console.log('[PAIR] Validating number');
+    console.log('[PAIR] Creating/reusing socket...');
+
+    const sock = await initSocket();
+
+    console.log('[PAIR] Socket obtained, waiting for WS readiness...');
+    await waitForWsReady(sock, 20000);
+
+    const wsReadyMs = Date.now() - pairStart;
+    console.log(`[PAIR] Socket ready in ${wsReadyMs}ms`);
+    console.log('[PAIR] Requesting pairing code...');
+
+    const code = await sock.requestPairingCode(phoneNumber);
+
+    const codeMs = Date.now() - pairStart;
+    console.log(`[PAIR] Pairing code generated: ${code}`);
+    console.log(`[PAIR] Code generation completed in ${codeMs}ms`);
+    console.log('[PAIR] Waiting for WhatsApp authentication...');
+
+    return code;
 };
 
 // ── Safe command executor ─────────────────────────────────────────────────────
@@ -359,81 +572,142 @@ async function safeExecuteCommand(cmd, sock, mek, contextObj) {
     }
 }
 
+// Helper to recursively unwrap Baileys message structures (ephemeral, view-once, etc.)
+function unwrapMessage(msg) {
+    if (!msg) return msg;
+    if (msg.ephemeralMessage?.message) return unwrapMessage(msg.ephemeralMessage.message);
+    if (msg.viewOnceMessage?.message) return unwrapMessage(msg.viewOnceMessage.message);
+    if (msg.viewOnceMessageV2?.message) return unwrapMessage(msg.viewOnceMessageV2.message);
+    if (msg.documentWithCaptionMessage?.message) return unwrapMessage(msg.documentWithCaptionMessage.message);
+    return msg;
+}
+
+// Helper to extract clean button click responses from multiple possible WhatsApp response structures
+function extractInteractiveResponse(rawMsg) {
+    if (!rawMsg) return null;
+    const type = getContentType(rawMsg);
+    let id = '';
+    let text = '';
+
+    if (type === 'buttonsResponseMessage') {
+        id = rawMsg.buttonsResponseMessage?.selectedButtonId || '';
+        text = rawMsg.buttonsResponseMessage?.selectedDisplayText || '';
+    } else if (type === 'interactiveResponseMessage') {
+        try {
+            const native = rawMsg.interactiveResponseMessage?.nativeFlowResponseMessage;
+            const params = JSON.parse(native?.paramsJson || '{}');
+            id = params.id || '';
+            text = rawMsg.interactiveResponseMessage?.body?.text || '';
+        } catch (_) {}
+    } else if (type === 'listResponseMessage') {
+        id = rawMsg.listResponseMessage?.singleSelectReply?.selectedRowId || '';
+        text = rawMsg.listResponseMessage?.title || '';
+    } else if (type === 'templateButtonReplyMessage') {
+        id = rawMsg.templateButtonReplyMessage?.selectedId || '';
+        text = rawMsg.templateButtonReplyMessage?.selectedDisplayText || '';
+    }
+
+    if (id) {
+        return { type, id, text };
+    }
+    return null;
+}
+
 // Setup message handlers
 const setupMessageHandlers = (sock) => {
-    // FIX: Single combined messages.upsert handler (was two separate — wasteful + confusing)
     sock.ev.on('messages.upsert', async ({ messages }) => {
         if (!messages || !messages.length) return;
         const mek = messages[0];
         if (!mek?.message || mek.key.remoteJid === 'status@broadcast') return;
 
         const from = mek.key.remoteJid;
+        const prefix = config.PREFIX || '.';
 
-        // ── SECTION 1: Button / NativeFlow response handling ─────────────────
-        const msgType = getContentType(mek.message);
-        let buttonId = '';
+        // ── Normalization Layer ──
+        const rawMsg = unwrapMessage(mek.message);
+        if (!rawMsg) return;
 
-        if (msgType === 'buttonsResponseMessage') {
-            buttonId = mek.message.buttonsResponseMessage?.selectedButtonId || '';
-        }
-        if (msgType === 'interactiveResponseMessage') {
-            try {
-                const native = mek.message.interactiveResponseMessage?.nativeFlowResponseMessage;
-                const params = JSON.parse(native?.paramsJson || '{}');
-                buttonId = params.id || '';
-            } catch (_) {}
-        }
+        const rawType = getContentType(rawMsg);
+        const interaction = extractInteractiveResponse(rawMsg);
+        const isButton = !!interaction;
+        const buttonId = isButton ? interaction.id : '';
+        const buttonText = isButton ? interaction.text : '';
 
-        if (buttonId) {
-            const prefix = config.PREFIX || '.';
-            // Handle built-in button IDs by converting them to virtual commands
-            if (buttonId === 'novax_menu') {
-                const menuCmd = (global.commands || []).find(c => c.pattern === 'menu' || c.pattern === 'allmenu');
-                if (menuCmd) {
-                    const fakeCtx = { from, sender: mek.key.participant || from, isOwner: false, isGroup: from.endsWith('@g.us'), reply: t => sock.sendMessage(from, { text: t }, { quoted: mek }), body: `${prefix}menu`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config };
-                    await safeExecuteCommand(menuCmd, sock, mek, fakeCtx);
+        const reply = textMsg => sock.sendMessage(from, { text: textMsg }, { quoted: mek });
+
+        // ── 1. Category & Back Button Interceptor (BEFORE normal routing) ──
+        if (isButton && buttonId) {
+            console.log(`[BUTTON DEBUG]`);
+            console.log(`raw message type: ${rawType}`);
+            console.log(`interactive type: ${interaction.type}`);
+            console.log(`raw paramsJson: ${rawMsg.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson || 'N/A'}`);
+            console.log(`extracted id: ${buttonId}`);
+            console.log(`extracted text: ${buttonText}`);
+
+            // A. Back button handler
+            if (buttonId === 'menu_back') {
+                console.log(`[MENU] Back button clicked — returning to main menu`);
+                const menuCmd = (global.commands || []).find(c => c.pattern === 'menu');
+                if (menuCmd && typeof menuCmd.handler === 'function') {
+                    await menuCmd.handler(sock, mek, mek, { from, sender: mek.key.participant || from, isOwner: false, isGroup: from.endsWith('@g.us'), reply, body: `${prefix}menu`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config });
+                }
+                return;
+            }
+
+            // B. Category selections (category:downloader, category:ai, category:tools)
+            if (buttonId.startsWith('category:')) {
+                const categoryName = buttonId.split(':')[1];
+                console.log(`[MENU] Category detected: ${categoryName}`);
+
+                const allMenuCmd = (global.commands || []).find(c => c.pattern === 'allmenu');
+                if (allMenuCmd && typeof allMenuCmd.handler === 'function') {
+                    console.log(`[MENU] Routing directly to allmenu handler with category: ${categoryName}`);
+                    await allMenuCmd.handler(sock, mek, mek, { from, sender: mek.key.participant || from, isOwner: false, isGroup: from.endsWith('@g.us'), reply, body: `${prefix}allmenu ${categoryName}`, args: [categoryName], q: categoryName, text: categoryName, quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config });
                 } else {
-                    await sock.sendMessage(from, { text: `Use *${prefix}menu* to see all commands.` }, { quoted: mek }).catch(() => {});
+                    console.log(`[MENU] allmenu handler not found for category: ${categoryName}`);
+                    await reply('⚠️ Category menu is currently unavailable.');
+                }
+                return;
+            }
+
+            // C. Built-in welcome actions
+            if (buttonId === 'novax_menu') {
+                const menuCmd = (global.commands || []).find(c => c.pattern === 'menu');
+                if (menuCmd) {
+                    await menuCmd.handler(sock, mek, mek, { from, sender: mek.key.participant || from, isOwner: false, isGroup: from.endsWith('@g.us'), reply, body: `${prefix}menu`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config });
                 }
                 return;
             }
             if (buttonId === 'novax_settings') {
                 const settingsCmd = (global.commands || []).find(c => ['settings', 'setting', 'mode', 'config'].includes(c.pattern));
                 if (settingsCmd) {
-                    const fakeCtx = { from, sender: mek.key.participant || from, isOwner: true, isGroup: from.endsWith('@g.us'), reply: t => sock.sendMessage(from, { text: t }, { quoted: mek }), body: `${prefix}settings`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config };
-                    await safeExecuteCommand(settingsCmd, sock, mek, fakeCtx);
-                } else {
-                    await sock.sendMessage(from, { text: `╭━━━〔 *⚙️ NovaX Mini Settings* 〕━━━┈\n┃ Use *${prefix}mode* to toggle bot mode.\n┃ Visit: http://localhost:${config.PORT || 5000}\n╰━━━━━━━━━━━━━━━┈` }, { quoted: mek }).catch(() => {});
+                    await settingsCmd.handler(sock, mek, mek, { from, sender: mek.key.participant || from, isOwner: true, isGroup: from.endsWith('@g.us'), reply, body: `${prefix}settings`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config });
                 }
                 return;
             }
             if (buttonId === 'contact_owner') {
                 const ownerNum = config.OWNER_NUMBER || '94789737967';
-                await sock.sendMessage(from, { text: `📞 Contact the owner: wa.me/${ownerNum}` }, { quoted: mek }).catch(() => {});
+                await reply(`📞 Contact the owner: wa.me/${ownerNum}`);
                 return;
-            }
-            // Generic button: if ID starts with prefix, treat as a command
-            if (buttonId.startsWith(prefix)) {
-                // Re-process as text command (fall through to SECTION 2)
-                mek.message.conversation = buttonId;
             }
         }
 
-        // ── SECTION 2: Text command handling ─────────────────────────────────
-        try {
-            // Un-ephemeral message if needed
-            const rawMsg = getContentType(mek.message) === 'ephemeralMessage'
-                ? mek.message.ephemeralMessage.message
-                : mek.message;
-
-            const type = getContentType(rawMsg);
-            const isGroup = from.endsWith('@g.us');
-
-            const body = type === 'conversation'
+        // ── 2. Command Extraction & Routing ──
+        let body = '';
+        if (isButton && buttonId) {
+            // Normal buttons (like command triggers) get prefix prepended if missing
+            if (!buttonId.startsWith(prefix)) {
+                body = prefix + buttonId;
+            } else {
+                body = buttonId;
+            }
+        } else {
+            body = rawType === 'conversation'
                 ? rawMsg.conversation
-                : rawMsg[type]?.text || rawMsg[type]?.caption || '';
+                : rawMsg[rawType]?.text || rawMsg[rawType]?.caption || '';
+        }
 
-            const prefix = config.PREFIX || '.';
+        try {
             if (!body || !body.startsWith(prefix)) return;
 
             const commandName = body.slice(prefix.length).trim().split(' ')[0].toLowerCase();
@@ -445,8 +719,7 @@ const setupMessageHandlers = (sock) => {
             const sender    = mek.key.fromMe ? (sock.user?.id || '') : (mek.key.participant || from);
             const senderNumber = sender.split('@')[0].split(':')[0];
             const isOwner   = (config.OWNER_NUMBER || '94789737967').split(',').map(n => n.trim()).includes(senderNumber);
-            const reply     = textMsg => sock.sendMessage(from, { text: textMsg }, { quoted: mek });
-            const quoted    = rawMsg[type]?.contextInfo?.quotedMessage || null;
+            const quoted    = rawMsg[rawType]?.contextInfo?.quotedMessage || null;
             const botNumber = sock.user ? sock.user.id.split('@')[0].split(':')[0] : '';
 
             // ⚡ Buffered stats
@@ -459,7 +732,7 @@ const setupMessageHandlers = (sock) => {
             let isAdmins      = false;
             let isBotAdmins   = false;
 
-            if (isGroup) {
+            if (from.endsWith('@g.us')) {
                 try {
                     groupMetadata = await sock.groupMetadata(from).catch(() => null);
                     if (groupMetadata) {
@@ -474,18 +747,24 @@ const setupMessageHandlers = (sock) => {
             }
 
             const cmd = (global.commands || []).find(c => c.pattern === commandName && c.enabled !== false);
-            if (!cmd) return;
+            if (!cmd) {
+                if (isButton) {
+                    console.log(`[BUTTON DEBUG] Unknown button ID: ${buttonId}`);
+                    await reply('⚠️ This button is currently unavailable. Please try the command again.');
+                }
+                return;
+            }
 
             // Owner / Group / Admin permission checks
             if (cmd.owner && !isOwner) return reply('🚫 This command is only for the Owner!');
-            if (cmd.group && !isGroup) return reply('❌ This command can only be used in groups.');
+            if (cmd.group && !from.endsWith('@g.us')) return reply('❌ This command can only be used in groups.');
             if (cmd.admin && !isAdmins) return reply('❌ Only group admins can use this command.');
 
             const contextObj = {
                 from,
                 sender,
                 isOwner,
-                isGroup,
+                isGroup: from.endsWith('@g.us'),
                 groupMetadata,
                 groupAdmins,
                 isAdmins,
@@ -500,13 +779,22 @@ const setupMessageHandlers = (sock) => {
                 config
             };
 
+            if (isButton) {
+                console.log(`[BUTTON DEBUG] matched command: ${commandName}`);
+                console.log(`[BUTTON DEBUG] matched plugin: ${cmd.filename ? path.basename(cmd.filename) : 'N/A'}`);
+                console.log(`[BUTTON DEBUG] handler executing...`);
+            }
+
             await safeExecuteCommand(cmd, sock, mek, contextObj);
+
+            if (isButton) {
+                console.log(`[BUTTON DEBUG] response sent successfully`);
+            }
 
         } catch (err) {
             logger.error('[botService] Message handler error:', err.message);
         }
     });
-
 };
 
 // Bot utility functions
@@ -533,6 +821,9 @@ const disconnectBot = async (botId) => {
         global.conn = null;
         activeSockets.delete('main');
         initPromise = null;
+        // Reset pair notification flag on explicit disconnect
+        pairSuccessNotified = false;
+        reconnectAttempts   = 0;
         await Bot.update({ status: 'disconnected' }, { where: { id: botId } });
     }
 };
@@ -542,5 +833,6 @@ module.exports = {
     createBotSession,
     getBotStatus,
     updateBotSettings,
-    disconnectBot
+    disconnectBot,
+    pairingLocks  // ← exported so routes can check per-phone lock status
 };

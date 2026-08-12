@@ -25,9 +25,19 @@ cmd({
     category: 'main',
     react:    '📋',
     filename: __filename
-}, async (conn, mek, m, { from, sender, reply }) => {
+}, async (conn, mek, m, { from, sender, reply, args, body }) => {
     try {
         const prefix  = config.PREFIX  || '.';
+        
+        // If arguments are provided (e.g. .menu download), forward directly to allmenu handler
+        if (args && args.length > 0) {
+            const allMenuCmd = (global.commands || []).find(c => c.pattern === 'allmenu');
+            if (allMenuCmd && typeof allMenuCmd.handler === 'function') {
+                console.log(`[MENU] Forwarding category menu request to allmenu.js: ${args.join(' ')}`);
+                return await allMenuCmd.handler(conn, mek, m, { from, sender, reply, args, body, command: 'allmenu' });
+            }
+        }
+        
         const botName = config.BOT_NAME || 'NovaX Mini';
         const version = config.BOT_VERSION || '3.0.0';
         const totalCmds = (global.commands || []).filter(c => c.enabled !== false && !c.meta?.dontAddCommandList).length;

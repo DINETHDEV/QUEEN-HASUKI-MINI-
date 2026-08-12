@@ -10,7 +10,9 @@ const QRCode = require('qrcode');
 const { Bot } = require('../database/models');
 const { authenticateToken } = require('../middleware/auth');
 const { botLimiter } = require('../middleware/rateLimiter');
-const { initSocket, createBotSession, getBotStatus, updateBotSettings } = require('../services/botService');
+const _botService = require('../services/botService');
+const { initSocket, createBotSession, getBotStatus, updateBotSettings } = _botService;
+const pairingLocks = _botService.pairingLocks || new Map(); // fallback prevents crash if export missing
 const { getMongoStatus } = require('../database/connection');
 const pluginManager = require('../lib/pluginManager');
 const dbLib = require('../lib/database');
@@ -205,8 +207,6 @@ router.post('/create', authenticateToken, botLimiter, async (req, res) => {
     }
 });
 
-let pairingInProgress = false;
-
 // Normalize phone numbers to Baileys format
 function normalizePhoneNumber(num) {
     if (!num || typeof num !== 'string') return null;
@@ -221,34 +221,64 @@ function normalizePhoneNumber(num) {
 }
 
 router.post('/pair', authenticateToken, botLimiter, async (req, res) => {
+    const { botId, phoneNumber } = req.body;
+    let normalizedPhone = null;
+    let bot = null;
+
+    // ── Route-level timeout (30 s) — prevents HTTP hanging forever ──
+    const ROUTE_TIMEOUT_MS = 30000;
+    let routeTimedOut = false;
+    const routeTimer = setTimeout(() => {
+        routeTimedOut = true;
+        if (!res.headersSent) {
+            if (normalizedPhone) pairingLocks.delete(normalizedPhone);
+            if (global.io) global.io.emit('pairing:error', { error: 'Pairing request timed out' });
+            res.status(504).json({
+                success: false,
+                message: 'Pairing request timed out',
+                error:   'TIMEOUT'
+            });
+        }
+    }, ROUTE_TIMEOUT_MS);
+
     try {
-        const { botId, phoneNumber } = req.body;
+        console.log('[PAIR] Request received');
+        console.log('[PAIR] Validating number');
 
         let targetPhone = phoneNumber;
-        let bot = null;
 
         if (botId) {
             bot = await Bot.findOne({ id: botId, userId: req.user.id });
             if (!bot) {
+                clearTimeout(routeTimer);
                 return res.status(404).json({ success: false, message: 'Bot not found' });
             }
             targetPhone = bot.phoneNumber;
         }
 
         if (!targetPhone) {
+            clearTimeout(routeTimer);
             return res.status(400).json({ success: false, message: 'Phone number is required' });
         }
 
-        const normalizedPhone = normalizePhoneNumber(targetPhone);
+        normalizedPhone = normalizePhoneNumber(targetPhone);
         if (!normalizedPhone) {
-            return res.status(400).json({ success: false, message: 'Invalid phone number format. Must be 10-15 digits.' });
+            clearTimeout(routeTimer);
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid phone number format. Must be 10-15 digits.'
+            });
         }
 
-        // ── LOCK CHECK ──
-        if (pairingInProgress) {
-            return res.status(409).json({ success: false, error: 'Pairing already in progress' });
+        // ── Per-phone pairing lock (prevents duplicate requests) ──
+        if (pairingLocks.has(normalizedPhone)) {
+            clearTimeout(routeTimer);
+            return res.status(409).json({
+                success: false,
+                message: 'Pairing request already in progress for this number'
+            });
         }
-        pairingInProgress = true;
+        pairingLocks.set(normalizedPhone, true);
 
         if (global.io) {
             global.io.emit('pairing:started', { phoneNumber: normalizedPhone });
@@ -256,58 +286,74 @@ router.post('/pair', authenticateToken, botLimiter, async (req, res) => {
 
         // Check if an authenticated session already exists
         if (global.conn && global.conn.user) {
-            pairingInProgress = false;
-            return res.status(400).json({ success: false, message: 'An active session already exists. Disconnect first.' });
+            clearTimeout(routeTimer);
+            pairingLocks.delete(normalizedPhone);
+            return res.status(400).json({
+                success: false,
+                message: 'An active session already exists. Disconnect first.'
+            });
         }
 
-        // ── TIMEOUT PROMISE ──
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('TIMEOUT')), 25000); // 25s timeout
+        console.log('[PAIR] Creating/reusing socket');
+        const rawCode = await createBotSession(normalizedPhone);
+
+        if (routeTimedOut) return; // response already sent by timer
+
+        // Format code to XXXX-XXXX
+        let formattedCode = rawCode;
+        if (rawCode && rawCode.length === 8 && !rawCode.includes('-')) {
+            formattedCode = rawCode.substring(0, 4) + '-' + rawCode.substring(4);
+        }
+
+        // Non-blocking DB update after returning the code
+        setImmediate(async () => {
+            try {
+                if (bot) await bot.update({ pairingCode: formattedCode, status: 'connecting' });
+            } catch (_) {}
         });
 
-        try {
-            const rawCode = await Promise.race([
-                createBotSession(normalizedPhone),
-                timeoutPromise
-            ]);
-
-            // Format code to XXXX-XXXX format if it's 8 characters
-            let formattedCode = rawCode;
-            if (rawCode && rawCode.length === 8 && !rawCode.includes('-')) {
-                formattedCode = rawCode.substring(0, 4) + '-' + rawCode.substring(4);
-            }
-
+        if (global.io) {
+            global.io.emit('pairing:code', { pairingCode: formattedCode });
             if (bot) {
-                await bot.update({ pairingCode: formattedCode, status: 'connecting' });
+                global.io.to(`user_${req.user.id}`).emit('bot_status_update', {
+                    botId:       bot.id,
+                    status:      'connecting',
+                    pairingCode: formattedCode
+                });
             }
-
-            if (global.io) {
-                global.io.emit('pairing:code', { pairingCode: formattedCode });
-                if (bot) {
-                    global.io.to(`user_${req.user.id}`).emit('bot_status_update', {
-                        botId: bot.id,
-                        status: 'connecting',
-                        pairingCode: formattedCode
-                    });
-                }
-            }
-
-            pairingInProgress = false;
-            res.json({ success: true, pairingCode: formattedCode, data: { pairingCode: formattedCode } });
-        } catch (err) {
-            pairingInProgress = false;
-            const errMsg = err.message === 'TIMEOUT'
-                ? 'Unable to generate pairing code. Check WhatsApp connection and phone number.'
-                : `Pairing code generation failed: ${err.message}`;
-
-            if (global.io) {
-                global.io.emit('pairing:error', { error: errMsg });
-            }
-            res.status(500).json({ success: false, error: errMsg, message: errMsg });
         }
+
+        clearTimeout(routeTimer);
+        console.log(`[PAIR] Returning code to client: ${formattedCode}`);
+        res.json({
+            success:     true,
+            code:        formattedCode,
+            pairingCode: formattedCode,
+            message:     'Pairing code generated successfully',
+            data:        { pairingCode: formattedCode }
+        });
+
     } catch (error) {
-        pairingInProgress = false;
-        res.status(500).json({ success: false, message: error.message });
+        clearTimeout(routeTimer);
+        if (routeTimedOut) return;
+
+        const errMsg = error.message || 'Unable to generate pairing code';
+        logger.error('[PAIR] /pair endpoint error:', errMsg);
+
+        if (global.io) {
+            global.io.emit('pairing:error', { error: errMsg });
+        }
+
+        if (!res.headersSent) {
+            res.status(500).json({
+                success: false,
+                message: 'Unable to generate pairing code',
+                error:   errMsg
+            });
+        }
+    } finally {
+        // Always release the per-phone lock
+        if (normalizedPhone) pairingLocks.delete(normalizedPhone);
     }
 });
 

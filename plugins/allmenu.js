@@ -45,9 +45,18 @@ cmd({
         const ownerNum = (config.OWNER_NUMBER || "").replace(/[^0-9]/g, "");
         const channelLink = config.CHANNEL_LINK || "https://whatsapp.com/channel/0029VbCZl6wBPzjczwuKpm1A";
 
+        // ── Command Registry Check & Safeguard ──
+        const commandList = Array.isArray(commands) ? commands : [];
+        if (!Array.isArray(commands)) {
+            console.error('[MENU] command registry is not an array!', typeof commands);
+        }
+        
+        console.log(`[MENU] command registry type: ${typeof commandList}`);
+        console.log(`[MENU] command count: ${commandList.length}`);
+
         let totalCommands = 0;
         const grouped = {};
-        for (const c of commands) {
+        for (const c of commandList) {
             if (!c.pattern || !c.category || c.dontAddCommandList) continue;
             totalCommands++;
             const cat = c.category.toLowerCase();
@@ -58,13 +67,20 @@ cmd({
         const imgUrl = config.IMAGE_PATH || "https://files.catbox.moe/aeg27n.png";
 
         if (args && args.length > 0) {
-            const selectedCategory = args.slice(1).join(" ").toLowerCase().trim() || args[0].toLowerCase().trim();
-            const catCommands = grouped[selectedCategory];
+            const selectedCategory = args.join(" ").toLowerCase().trim();
+            console.log(`[MENU] Category button clicked`);
+            console.log(`[MENU] Extracted category ID: ${selectedCategory}`);
+            
+            const catCommands = grouped[selectedCategory] || [];
 
-            if (!catCommands || catCommands.length === 0) {
+            if (!catCommands.length) {
+                console.log(`[MENU] Unknown category: ${selectedCategory}`);
                 const available = Object.keys(grouped).map(c => getCatMeta(c).emoji + " " + getCatMeta(c).name).join("\n");
                 return reply(`╭━━━〔 *${lang.NOT_FOUND}* 〕━━━┈\n┃ Available categories:\n${available.split("\n").map(l => "┃ " + l).join("\n")}\n╰━━━━━━━━━━━━━━━┈\n> ${config.BOT_FOOTER}`);
             }
+
+            console.log(`[MENU] Category detected: ${selectedCategory}`);
+            console.log(`[MENU] Commands found: ${catCommands.length}`);
 
             const meta = getCatMeta(selectedCategory);
             const cmdList = catCommands.map(c => `┃ ◈ ${prefix}${c.pattern}`).join("\n");
@@ -80,11 +96,12 @@ cmd({
                 `╰━━━━━━━━━━━━━━━┈`;
 
             const subButtons = [
-                qr(`🔙 Back`, `${prefix}menu`),
+                qr(`🔙 Back`, `menu_back`),
                 url(`👨‍💻 ${lang.MENU_OWNER}`, ownerNum ? `https://wa.me/${ownerNum}` : channelLink),
                 url("🌐 Website", channelLink)
             ];
 
+            console.log(`[MENU] Category response sent for: ${selectedCategory}`);
             return await sendInteractive(conn, from, mek, {
                 imageUrl: imgUrl,
                 title: `${meta.emoji} ${meta.name}`,
@@ -95,6 +112,7 @@ cmd({
             });
         }
 
+        console.log(`[MENU] Main menu sent`);
         const categories = Object.keys(grouped).sort();
         const rows = categories.map(cat => {
             const meta = getCatMeta(cat);
@@ -103,7 +121,7 @@ cmd({
             return {
                 title: `${meta.emoji} ${meta.name}`,
                 description: `${cmdCount} commands • ${sampleCmds}${cmdCount > 3 ? "..." : ""}`,
-                id: `${prefix}menu ${cat}`
+                id: `category:${cat}`
             };
         });
 
