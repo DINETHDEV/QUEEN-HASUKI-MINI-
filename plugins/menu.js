@@ -1,41 +1,64 @@
 /**
- * Menu Plugin (NovaX Mini) - Interactive Version
- * Powered by @itsliaaa/baileys
+ * NovaX Mini — Menu Plugin (Fixed)
+ *
+ * BUG FIXED:
+ *   Was using `module.exports = async function(socket, msg, bot)` format.
+ *   pluginManager.js registered this as cmd.function(socket, contextObj) so
+ *   msg was never the actual message — it was the contextObj, and
+ *   msg.key.remoteJid was always undefined.
+ *
+ *   Fixed by converting to standard cmd() format.
+ *
+ * Copyright © 2025 Zero Bug Zone
  */
 
-const { sendInteractive, qr } = require('../lib/interactive');
-const config = require('../config');
+'use strict';
 
-module.exports = async (socket, msg, bot) => {
+const { cmd }            = require('../NovaX_Mini');
+const { sendInteractive, qr, url } = require('../lib/interactive');
+const config             = require('../config');
+
+cmd({
+    pattern:  'menu',
+    alias:    ['help', 'start', 'cmds'],
+    desc:     'Show the main command menu',
+    category: 'main',
+    react:    '📋',
+    filename: __filename
+}, async (conn, mek, m, { from, sender, reply }) => {
     try {
-        const prefix = (bot && bot.settings && bot.settings.prefix) ? bot.settings.prefix : (config.PREFIX || '.');
-        const botName = bot ? (bot.botName || config.BOT_NAME || 'NovaX Mini') : (config.BOT_NAME || 'NovaX Mini');
+        const prefix  = config.PREFIX  || '.';
+        const botName = config.BOT_NAME || 'NovaX Mini';
         const version = config.BOT_VERSION || '3.0.0';
+        const totalCmds = (global.commands || []).filter(c => c.enabled !== false && !c.meta?.dontAddCommandList).length;
 
-        const menuText = `⚡ *${botName}* ⚡
-Advanced WhatsApp Bot
+        const menuText =
+            `⚡ *${botName}* ⚡\n` +
+            `Advanced WhatsApp Bot\n\n` +
+            `🤖 *BOT INFO*\n` +
+            `• Name: ${botName}\n` +
+            `• Version: v${version}\n` +
+            `• Prefix: ${prefix}\n` +
+            `• Commands: ${totalCmds}\n` +
+            `• Status: Online ✅\n\n` +
+            `📋 Use *${prefix}allmenu* to see all commands by category.`;
 
-🤖 *BOT INFO*
-• Name: ${botName}
-• Version: v${version}
-• Prefix: ${prefix}
-• Status: Online ✅`;
-
-        await sendInteractive(socket, msg.key.remoteJid, msg, {
-            title: '👑 NovaX Mini Menu',
-            body: menuText,
-            footer: '© 2025 Zero Bug Zone',
+        await sendInteractive(conn, from, mek, {
+            imageUrl: config.IMAGE_PATH,
+            title:    '👑 NovaX Mini Menu',
+            body:     menuText,
+            footer:   config.BOT_FOOTER || '© 2025 Zero Bug Zone',
             buttons: [
-                qr('⚡ Alive', `${prefix}alive`),
-                qr('🏓 Ping', `${prefix}ping`),
+                qr('⚡ Alive',    `${prefix}alive`),
+                qr('🏓 Ping',     `${prefix}ping`),
                 qr('📋 All Menu', `${prefix}allmenu`),
             ]
         });
 
     } catch (error) {
-        console.error('Menu command error:', error);
-        await socket.sendMessage(msg.key.remoteJid, {
-            text: '❌ Error executing menu command'
-        }, { quoted: msg });
+        console.error('[menu] Error:', error);
+        await conn.sendMessage(from, {
+            text: `❌ Menu error: ${error.message}`
+        }, { quoted: mek }).catch(() => {});
     }
-};
+});

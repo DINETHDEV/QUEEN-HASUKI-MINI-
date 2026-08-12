@@ -292,13 +292,134 @@ const createBotSession = async (phoneNumber) => {
     }
 };
 
+// ── Safe command executor ─────────────────────────────────────────────────────
+/**
+ * Executes a registered command safely.
+ * Logs full details on failure. Sends user-friendly error (no sensitive info).
+ */
+async function safeExecuteCommand(cmd, sock, mek, contextObj) {
+    const commandName = contextObj.body?.slice((config.PREFIX || '.').length).trim().split(' ')[0].toLowerCase() || 'unknown';
+    const pluginFile  = cmd.meta?.filename ? require('path').basename(cmd.meta.filename) : (cmd.filename || 'unknown');
+
+    logger.info(`[NovaX:CMD] command received: ${commandName} | plugin: ${pluginFile} | sender: ${contextObj.sender} | chat: ${contextObj.from}`);
+
+    try {
+        if (typeof cmd.handler === 'function') {
+            await cmd.handler(sock, mek, mek, contextObj);
+        } else if (typeof cmd.function === 'function') {
+            await cmd.function(sock, contextObj);
+        } else {
+            logger.warn(`[NovaX:CMD] Command "${commandName}" has no handler or function.`);
+            return;
+        }
+
+        logger.info(`[NovaX:CMD] command completed: ${commandName}`);
+
+        // ⚡ Buffer command-executed stat (no per-command DB query)
+        statsBuffer.commandsExecuted++;
+
+    } catch (cmdErr) {
+        // Full error log for developers (never shown to user)
+        logger.error(
+            `[NovaX:ERROR]\n` +
+            `  Command   : ${commandName}\n` +
+            `  Plugin    : ${pluginFile}\n` +
+            `  Sender    : ${contextObj.sender}\n` +
+            `  Chat      : ${contextObj.from}\n` +
+            `  Timestamp : ${new Date().toISOString()}\n` +
+            `  Error     : ${cmdErr.message}\n` +
+            `  Stack     : ${cmdErr.stack}`
+        );
+
+        // User-facing error — redact sensitive info
+        const safeError = cmdErr.message
+            ? cmdErr.message
+                .replace(/\/[^\s]+/g, '[path]')     // hide file paths
+                .replace(/https?:\/\/[^\s]+/g, '[url]') // hide URLs
+                .substring(0, 120)
+            : 'Unknown error';
+
+        try {
+            await sock.sendMessage(
+                contextObj.from,
+                {
+                    text:
+                        `╭━━━〔 *❌ ɴᴏᴠᴀ_x ᴍɪɴɪ* 〕━━━┈\n` +
+                        `┃ ❌ Command failed.\n` +
+                        `┃\n` +
+                        `┃ 🔌 *Plugin:* ${pluginFile}\n` +
+                        `┃ 📋 *Error:* ${safeError}\n` +
+                        `┃\n` +
+                        `┃ Please try again.\n` +
+                        `╰━━━━━━━━━━━━━━━┈`
+                },
+                { quoted: mek }
+            );
+        } catch (_) {}
+    }
+}
+
 // Setup message handlers
 const setupMessageHandlers = (sock) => {
+    // FIX: Single combined messages.upsert handler (was two separate — wasteful + confusing)
     sock.ev.on('messages.upsert', async ({ messages }) => {
         if (!messages || !messages.length) return;
         const mek = messages[0];
         if (!mek?.message || mek.key.remoteJid === 'status@broadcast') return;
 
+        const from = mek.key.remoteJid;
+
+        // ── SECTION 1: Button / NativeFlow response handling ─────────────────
+        const msgType = getContentType(mek.message);
+        let buttonId = '';
+
+        if (msgType === 'buttonsResponseMessage') {
+            buttonId = mek.message.buttonsResponseMessage?.selectedButtonId || '';
+        }
+        if (msgType === 'interactiveResponseMessage') {
+            try {
+                const native = mek.message.interactiveResponseMessage?.nativeFlowResponseMessage;
+                const params = JSON.parse(native?.paramsJson || '{}');
+                buttonId = params.id || '';
+            } catch (_) {}
+        }
+
+        if (buttonId) {
+            const prefix = config.PREFIX || '.';
+            // Handle built-in button IDs by converting them to virtual commands
+            if (buttonId === 'novax_menu') {
+                const menuCmd = (global.commands || []).find(c => c.pattern === 'menu' || c.pattern === 'allmenu');
+                if (menuCmd) {
+                    const fakeCtx = { from, sender: mek.key.participant || from, isOwner: false, isGroup: from.endsWith('@g.us'), reply: t => sock.sendMessage(from, { text: t }, { quoted: mek }), body: `${prefix}menu`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config };
+                    await safeExecuteCommand(menuCmd, sock, mek, fakeCtx);
+                } else {
+                    await sock.sendMessage(from, { text: `Use *${prefix}menu* to see all commands.` }, { quoted: mek }).catch(() => {});
+                }
+                return;
+            }
+            if (buttonId === 'novax_settings') {
+                const settingsCmd = (global.commands || []).find(c => ['settings', 'setting', 'mode', 'config'].includes(c.pattern));
+                if (settingsCmd) {
+                    const fakeCtx = { from, sender: mek.key.participant || from, isOwner: true, isGroup: from.endsWith('@g.us'), reply: t => sock.sendMessage(from, { text: t }, { quoted: mek }), body: `${prefix}settings`, args: [], q: '', text: '', quoted: null, botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '', config };
+                    await safeExecuteCommand(settingsCmd, sock, mek, fakeCtx);
+                } else {
+                    await sock.sendMessage(from, { text: `╭━━━〔 *⚙️ NovaX Mini Settings* 〕━━━┈\n┃ Use *${prefix}mode* to toggle bot mode.\n┃ Visit: http://localhost:${config.PORT || 5000}\n╰━━━━━━━━━━━━━━━┈` }, { quoted: mek }).catch(() => {});
+                }
+                return;
+            }
+            if (buttonId === 'contact_owner') {
+                const ownerNum = config.OWNER_NUMBER || '94789737967';
+                await sock.sendMessage(from, { text: `📞 Contact the owner: wa.me/${ownerNum}` }, { quoted: mek }).catch(() => {});
+                return;
+            }
+            // Generic button: if ID starts with prefix, treat as a command
+            if (buttonId.startsWith(prefix)) {
+                // Re-process as text command (fall through to SECTION 2)
+                mek.message.conversation = buttonId;
+            }
+        }
+
+        // ── SECTION 2: Text command handling ─────────────────────────────────
         try {
             // Un-ephemeral message if needed
             const rawMsg = getContentType(mek.message) === 'ephemeralMessage'
@@ -306,7 +427,6 @@ const setupMessageHandlers = (sock) => {
                 : mek.message;
 
             const type = getContentType(rawMsg);
-            const from = mek.key.remoteJid;
             const isGroup = from.endsWith('@g.us');
 
             const body = type === 'conversation'
@@ -314,30 +434,30 @@ const setupMessageHandlers = (sock) => {
                 : rawMsg[type]?.text || rawMsg[type]?.caption || '';
 
             const prefix = config.PREFIX || '.';
-            if (!body.startsWith(prefix)) return;
+            if (!body || !body.startsWith(prefix)) return;
 
             const commandName = body.slice(prefix.length).trim().split(' ')[0].toLowerCase();
-            const args = body.trim().split(/ +/).slice(1);
-            const q = args.join(' ');
-            const text = q;
+            if (!commandName) return;
 
-            const sender = mek.key.fromMe ? (sock.user?.id || '') : (mek.key.participant || from);
+            const args      = body.trim().split(/ +/).slice(1);
+            const q         = args.join(' ');
+            const text      = q;
+            const sender    = mek.key.fromMe ? (sock.user?.id || '') : (mek.key.participant || from);
             const senderNumber = sender.split('@')[0].split(':')[0];
-            const isOwner = (config.OWNER_NUMBER || '94789737967').split(',').map(n => n.trim()).includes(senderNumber);
-
-            const reply = textMsg => sock.sendMessage(from, { text: textMsg }, { quoted: mek });
-            const quoted = rawMsg[type]?.contextInfo?.quotedMessage || null;
+            const isOwner   = (config.OWNER_NUMBER || '94789737967').split(',').map(n => n.trim()).includes(senderNumber);
+            const reply     = textMsg => sock.sendMessage(from, { text: textMsg }, { quoted: mek });
+            const quoted    = rawMsg[type]?.contextInfo?.quotedMessage || null;
             const botNumber = sock.user ? sock.user.id.split('@')[0].split(':')[0] : '';
 
-            // ⚡ Buffered stats — no DB call per message
+            // ⚡ Buffered stats
             statsBuffer.messagesReceived++;
             scheduleStatsFlush(botNumber);
 
             // Group metadata
             let groupMetadata = null;
-            let groupAdmins = [];
-            let isAdmins = false;
-            let isBotAdmins = false;
+            let groupAdmins   = [];
+            let isAdmins      = false;
+            let isBotAdmins   = false;
 
             if (isGroup) {
                 try {
@@ -346,7 +466,7 @@ const setupMessageHandlers = (sock) => {
                         groupAdmins = groupMetadata.participants
                             .filter(p => p.admin === 'admin' || p.admin === 'superadmin')
                             .map(p => p.id);
-                        isAdmins = groupAdmins.includes(sender);
+                        isAdmins    = groupAdmins.includes(sender);
                         const botJid = sock.user ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : '';
                         isBotAdmins = groupAdmins.some(a => a.startsWith(botJid.split('@')[0]));
                     }
@@ -354,156 +474,39 @@ const setupMessageHandlers = (sock) => {
             }
 
             const cmd = (global.commands || []).find(c => c.pattern === commandName && c.enabled !== false);
-            if (cmd) {
-                // Owner / Group check
-                if (cmd.owner && !isOwner) return reply('🚫 This command is only for the Owner!');
-                if (cmd.group && !isGroup) return reply('❌ This command can only be used in groups.');
-                if (cmd.admin && !isAdmins) return reply('❌ Only group admins can use this command.');
+            if (!cmd) return;
 
-                const contextObj = {
-                    from,
-                    sender,
-                    isOwner,
-                    isGroup,
-                    groupMetadata,
-                    groupAdmins,
-                    isAdmins,
-                    isBotAdmins,
-                    reply,
-                    body,
-                    args,
-                    q,
-                    text,
-                    quoted,
-                    botNumber,
-                    config
-                };
+            // Owner / Group / Admin permission checks
+            if (cmd.owner && !isOwner) return reply('🚫 This command is only for the Owner!');
+            if (cmd.group && !isGroup) return reply('❌ This command can only be used in groups.');
+            if (cmd.admin && !isAdmins) return reply('❌ Only group admins can use this command.');
 
-                try {
-                    if (typeof cmd.handler === 'function') {
-                        await cmd.handler(sock, mek, mek, contextObj);
-                    } else if (typeof cmd.function === 'function') {
-                        await cmd.function(sock, contextObj);
-                    }
+            const contextObj = {
+                from,
+                sender,
+                isOwner,
+                isGroup,
+                groupMetadata,
+                groupAdmins,
+                isAdmins,
+                isBotAdmins,
+                reply,
+                body,
+                args,
+                q,
+                text,
+                quoted,
+                botNumber,
+                config
+            };
 
-                    // Update executed stats
-                    try {
-                        const bot = await Bot.findOne({ phoneNumber: botNumber });
-                        if (bot) {
-                            const stats = bot.statistics || {};
-                            stats.commandsExecuted = (stats.commandsExecuted || 0) + 1;
-                            await bot.update({ statistics: stats });
-                        }
-                    } catch (_) {}
-                } catch (cmdErr) {
-                    logger.error(`[PLUGIN ERROR: ${commandName}]`, cmdErr);
-                    await reply(`❌ Error executing command: ${cmdErr.message}`);
-                }
-            }
+            await safeExecuteCommand(cmd, sock, mek, contextObj);
+
         } catch (err) {
-            logger.error('Message handler error:', err);
+            logger.error('[botService] Message handler error:', err.message);
         }
     });
 
-    // Button / NativeFlow response handling
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        if (!messages?.length) return;
-        const msg = messages[0];
-        if (!msg?.message) return;
-
-        const type = getContentType(msg.message);
-        const from = msg.key.remoteJid;
-
-        // Classic ButtonsResponseMessage
-        let buttonId = '';
-        if (type === 'buttonsResponseMessage') {
-            buttonId = msg.message.buttonsResponseMessage?.selectedButtonId || '';
-        }
-
-        // NativeFlow / Interactive response (interactiveResponseMessage)
-        if (type === 'interactiveResponseMessage') {
-            try {
-                const native = msg.message.interactiveResponseMessage?.nativeFlowResponseMessage;
-                const params = JSON.parse(native?.paramsJson || '{}');
-                buttonId = params.id || '';
-            } catch (_) {}
-        }
-
-        if (!buttonId) return;
-
-        const prefix = config.PREFIX || '.';
-
-        // ── NovaX Mini built-in button IDs ───────────────────────────────────
-        if (buttonId === 'novax_menu') {
-            // Trigger .menu command
-            const menuCmd = (global.commands || []).find(c => c.pattern === 'menu' || c.pattern === 'allmenu');
-            if (menuCmd && typeof menuCmd.handler === 'function') {
-                const fakeCtx = {
-                    from,
-                    sender: msg.key.participant || from,
-                    isOwner: false,
-                    isGroup: from.endsWith('@g.us'),
-                    reply: text => sock.sendMessage(from, { text }, { quoted: msg }),
-                    body: `${prefix}menu`,
-                    args: [],
-                    q: '',
-                    text: '',
-                    pushname: '',
-                    quoted: null,
-                    botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '',
-                    config
-                };
-                try { await menuCmd.handler(sock, msg, msg, fakeCtx); } catch (e) {
-                    logger.error('[Button:novax_menu] Error:', e.message);
-                }
-            } else {
-                await sock.sendMessage(from, { text: `Use *${prefix}menu* to see all commands.` }, { quoted: msg });
-            }
-            return;
-        }
-
-        if (buttonId === 'novax_settings') {
-            const settingsCmd = (global.commands || []).find(c => ['settings', 'setting', 'mode', 'config'].includes(c.pattern));
-            if (settingsCmd && typeof settingsCmd.handler === 'function') {
-                const fakeCtx = {
-                    from,
-                    sender: msg.key.participant || from,
-                    isOwner: true,
-                    isGroup: from.endsWith('@g.us'),
-                    reply: text => sock.sendMessage(from, { text }, { quoted: msg }),
-                    body: `${prefix}settings`,
-                    args: [],
-                    q: '',
-                    text: '',
-                    pushname: '',
-                    quoted: null,
-                    botNumber: sock.user?.id?.split('@')[0]?.split(':')[0] || '',
-                    config
-                };
-                try { await settingsCmd.handler(sock, msg, msg, fakeCtx); } catch (e) {
-                    logger.error('[Button:novax_settings] Error:', e.message);
-                }
-            } else {
-                await sock.sendMessage(from, {
-                    text:
-                        `╭━━━〔 *⚙️ NovaX Mini Settings* 〕━━━┈\n` +
-                        `┃ Use *${prefix}mode* to toggle bot mode.\n` +
-                        `┃ Visit the web panel for full settings:\n` +
-                        `┃ http://localhost:${config.PORT || 5000}\n` +
-                        `╰━━━━━━━━━━━━━━━┈`
-                }, { quoted: msg });
-            }
-            return;
-        }
-
-        // Legacy contact_owner button
-        if (buttonId === 'contact_owner') {
-            const ownerNum = config.OWNER_NUMBER || '94789737967';
-            await sock.sendMessage(from, {
-                text: `📞 Contact the owner: wa.me/${ownerNum}`
-            }, { quoted: msg });
-        }
-    });
 };
 
 // Bot utility functions

@@ -1,7 +1,7 @@
 const { cmd } = require('../NovaX_Mini');
 const config = require('../config');
 const axios = require('axios');
-const { sendInteractive, qr, url, errMsg } = require('../lib/interactive');
+const { sendInteractive, qr, url } = require('../lib/interactive');
 const { getUserLanguage } = require('../lib/database');
 const { getLang } = require('../lib/lang');
 
