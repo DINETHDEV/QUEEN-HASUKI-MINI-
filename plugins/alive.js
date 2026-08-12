@@ -1,53 +1,125 @@
-/**
- * Alive Command Plugin (QUEEN HASUKI)
- * Copyright © 2025 Zero Bug Zone
- */
+const { cmd } = require("../NovaX_Mini");
+const moment = require("moment-timezone");
+const os = require("os");
+const config = require("../config");
 
-module.exports = async (socket, msg, bot) => {
+const { sendInteractive, qr, url } = require("../lib/interactive");
+const { getLang } = require("../lib/lang");
+const { getUserLanguage } = require("../lib/database");
+
+let botStartTime = Date.now();
+
+const ALIVE_IMG =
+  config.IMAGE_PATH || "https://files.catbox.moe/aeg27n.png";
+
+cmd(
+  {
+    pattern: "alive",
+    alias: ["botstatus", "systemstatus"],
+    desc: "Check if the bot is active.",
+    category: "system",
+    react: "⚡",
+    filename: __filename,
+  },
+  async (conn, mek, m, { reply, from, sender }) => {
     try {
-        // Bot uptime calculation
-        const uptime = process.uptime();
-        const hours = Math.floor(uptime / 3600);
-        const minutes = Math.floor((uptime % 3600) / 60);
-        const seconds = Math.floor(uptime % 60);
+      // Resolve per-user language at runtime
+      let userLangCode = await getUserLanguage(sender);
+      if (!userLangCode) userLangCode = (config.LANGUAGE || 'en').toLowerCase();
+      const lang = getLang(userLangCode);
 
-        // Alive message format
-        const aliveMessage = `
-╔════════════════════╗
-      👑 *QUEEN HASUKI* 👑
-╚════════════════════╝
+      const pushname = m.pushName || "User";
 
-📡 *Status:* ✅ Online & Active  
-⏱️ *Uptime:* ${hours}h ${minutes}m ${seconds}s  
+      const currentTime = moment()
+        .tz("Asia/Colombo")
+        .format("HH:mm:ss");
 
-🤖 *Bot Name:* ${bot.botName || "QUEEN-HASUKI"}  
-📞 *Phone:* ${bot.phoneNumber || "Unknown"}  
-⚡ *Version:* ${bot.BOT_VERSION || '2.0.0'}  
+      const currentDate = moment()
+        .tz("Asia/Colombo")
+        .format("dddd, MMMM Do YYYY");
 
-━━━━━━━━━━━━━━━━━━━━━━
-✨ Powered by *Zero Bug Zone*  
-👑 Owner: *Dineth Sudarshana*  
-━━━━━━━━━━━━━━━━━━━━━━
-        `.trim();
+      const runtime = Date.now() - botStartTime;
 
-        // Bot logo / Alive image
-        const imageUrl = 'https://github.com/ZeroBugZone417/QUEEN-HASUKI-MINI-/blob/main/database/QUEEN%20HASUKI.png?raw=true';
+      const hours = Math.floor(runtime / (1000 * 60 * 60));
+      const minutes = Math.floor((runtime / (1000 * 60)) % 60);
+      const seconds = Math.floor((runtime / 1000) % 60);
 
-        // Send alive response
-        await socket.sendMessage(msg.key.remoteJid, {
-            image: { url: imageUrl },
-            caption: alive
-        }, { quoted: msg });
+      const uptime = `${hours}h ${minutes}m ${seconds}s`;
 
-        // Update bot statistics
-        const stats = bot.statistics || {};
-        stats.messagesSent = (stats.messagesSent || 0) + 1;
-        await bot.update({ statistics: stats });
+      const totalMem = (os.totalmem() / 1024 / 1024).toFixed(0);
+      const freeMem = (os.freemem() / 1024 / 1024).toFixed(0);
+      const usedMem = (totalMem - freeMem).toFixed(0);
 
+      const prefix = config.PREFIX || ".";
+
+      const version = require("../package.json").version;
+
+      const formattedInfo = `
+╭━━━━━━━━━━━━━━━━━━━━━━━❊
+┃      ⚡ ɴᴏᴠᴀx ᴍɪɴɪ ⚡
+┃   sʏsᴛᴇᴍ • sᴛᴀᴛᴜs
+╰━━━━━━━━━━━━━━━━━━━━━━━❊
+
+👋 Hello *${pushname}*
+
+╭──〔 🤖 ${lang.BOT_INFO || 'BOT INFO'} 〕
+┃ 🟢 Status   : ${lang.STATUS_ONLINE || 'ONLINE'}
+┃ 📦 Version  : v${version}
+┃ ⚙ Prefix    : ${prefix}
+┃ 👑 Owner    : ${config.OWNER_NAME || "Dineth Sudarshana"}
+╰─────────────────────
+
+╭──〔 ⚡ ${lang.PERFORMANCE || 'PERFORMANCE'} 〕
+┃ ⏳ Uptime   : ${uptime}
+┃ 💾 RAM      : ${usedMem} MB / ${totalMem} MB
+┃ 🖥 Platform : ${os.platform()}
+┃ 💻 Host     : ${os.hostname()}
+╰─────────────────────
+
+╭──〔 📅 ${lang.DATE_TIME || 'DATE & TIME'} 〕
+┃ 📆 ${currentDate}
+┃ 🕒 ${currentTime}
+╰─────────────────────
+
+╭──〔 🚀 ${lang.NOVAX_ENGINE || 'NOVAX MINI'} 〕
+┃ ${lang.ALIVE_MSG}
+┃
+┃ ${lang.PREMIUM_BOT || '✨ Premium WhatsApp Bot'}
+┃ ${lang.FAST_RESP   || '⚡ Fast Response'}
+┃ ${lang.STABLE      || '🔥 Stable Performance'}
+┃ ${lang.SECURE      || '🛡 Secure System'}
+╰─────────────────────
+
+🌐 *Official Channel*
+${config.CHANNEL_LINK ||
+        "https://whatsapp.com/channel/0029VbCZl6wBPzjczwuKpm1A"}
+
+> ${config.BOT_FOOTER}
+`.trim();
+
+      await sendInteractive(conn, from, mek, {
+        imageUrl: ALIVE_IMG,
+        body: formattedInfo,
+
+        buttons: [
+          qr(lang.MENU_BTN || "📋 MENU", `${prefix}menu`),
+          qr(lang.PING_REFRESH || "🏓 PING", `${prefix}ping`),
+          url(
+            "📢 CHANNEL",
+            config.CHANNEL_LINK ||
+              "https://whatsapp.com/channel/0029VbCZl6wBPzjczwuKpm1A"
+          ),
+        ],
+      });
     } catch (error) {
-        console.error('Alive command error:', error);
-        await socket.sendMessage(msg.key.remoteJid, {
-            text: '❌ Error executing alive command'
-        }, { quoted: msg });
+      console.error(error);
+
+      return reply(
+        `╭━━━〔 ❌ ERROR 〕━━━
+┃ ${error.message}
+╰━━━━━━━━━━━━━━
+> ${config.BOT_FOOTER}`
+      );
     }
-};
+  }
+);

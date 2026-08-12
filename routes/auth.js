@@ -1,12 +1,13 @@
 /**
- * Authentication Routes
- * Copyright © 2025 DarkSide Developers
+ * Authentication Routes (MongoDB)
+ * Copyright © 2025 DarkSide Developers & Zero Bug Zone
  */
+
+'use strict';
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const { Op } = require('sequelize');
 const { User } = require('../database/models');
 const { authLimiter } = require('../middleware/rateLimiter');
 const { sendWelcomeEmail } = require('../services/emailService');
@@ -28,13 +29,10 @@ router.post('/register', authLimiter, async (req, res) => {
         }
 
         // Check if user exists
-        const existingUser = await User.findOne({
-            where: {
-                [Op.or]: [{ email }, { username }]
-            }
-        });
+        const existingEmail = await User.findOne({ email });
+        const existingUsername = await User.findOne({ username });
 
-        if (existingUser) {
+        if (existingEmail || existingUsername) {
             return res.status(409).json({
                 success: false,
                 message: 'User with this email or username already exists'
@@ -105,7 +103,7 @@ router.post('/login', authLimiter, async (req, res) => {
         }
 
         // Find user
-        const user = await User.findOne({ where: { email } });
+        const user = await User.findOne({ email });
         if (!user) {
             return res.status(401).json({
                 success: false,
@@ -171,9 +169,7 @@ router.get('/verify-email/:token', async (req, res) => {
     try {
         const { token } = req.params;
 
-        const user = await User.findOne({
-            where: { emailVerificationToken: token }
-        });
+        const user = await User.findOne({ emailVerificationToken: token });
 
         if (!user) {
             return res.status(400).json({
@@ -205,7 +201,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
     try {
         const { email } = req.body;
 
-        const user = await User.findOne({ where: { email } });
+        const user = await User.findOne({ email });
         if (!user) {
             return res.json({
                 success: true,
@@ -221,9 +217,6 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
             resetPasswordExpires: resetExpires
         });
 
-        // Send reset email (implement in emailService)
-        // await sendPasswordResetEmail(user.email, resetToken);
-
         res.json({
             success: true,
             message: 'If the email exists, a reset link has been sent'
@@ -234,6 +227,33 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
             success: false,
             message: 'Failed to process request'
         });
+    }
+});
+
+// Get current user (token verification)
+const { authenticateToken } = require('../middleware/auth');
+router.get('/me', authenticateToken, async (req, res) => {
+    try {
+        res.json({
+            success: true,
+            data: {
+                user: {
+                    id: req.user.id,
+                    username: req.user.username,
+                    email: req.user.email,
+                    firstName: req.user.firstName,
+                    lastName: req.user.lastName,
+                    isAdmin: req.user.isAdmin,
+                    emailVerified: req.user.emailVerified,
+                    theme: req.user.theme,
+                    avatar: req.user.avatar,
+                    phoneNumber: req.user.phoneNumber
+                }
+            }
+        });
+    } catch (error) {
+        console.error('Get me error:', error);
+        res.status(500).json({ success: false, message: 'Failed to fetch user' });
     }
 });
 

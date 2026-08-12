@@ -1,81 +1,34 @@
 /**
- * Database Connection Handler
- * Copyright © 2025 DarkSide Developers
+ * Database Connection Handler (MongoDB Atlas)
+ * Copyright © 2025 DarkSide Developers & Zero Bug Zone
  */
 
-const { Sequelize } = require('sequelize');
-const config = require('../config');
-const chalk = require('chalk');
+'use strict';
 
-const DATABASE_URL = config.DATABASE_URL;
+const { connectMongoDB, getMongoStatus, closeMongoDB } = require('../lib/mongodb');
+const logger = require('../lib/logger');
 
-// Advanced Database Connection with Error Handling
-const database = DATABASE_URL === "local" ?
-    new Sequelize({ 
-        dialect: 'sqlite', 
-        storage: "database/models/hasuki.db", 
-        logging: false,
-        pool: {
-            max: 5,
-            min: 0,
-            acquire: 30000,
-            idle: 10000
-        }
-    }) :
-    new Sequelize(DATABASE_URL, {
-        dialect: 'postgres',
-        ssl: true,
-        protocol: 'postgres',
-        dialectOptions: { 
-            native: true, 
-            ssl: { 
-                require: true, 
-                rejectUnauthorized: false 
-            } 
-        },
-        logging: false,
-        pool: {
-            max: 10,
-            min: 0,
-            acquire: 30000,
-            idle: 10000
-        }
-    });
-
-// Connection Test with Advanced Error Handling
 const connectDatabase = async () => {
     try {
-        await database.authenticate();
-        console.log(chalk.green('✅ Database connection established successfully.'));
-        
-        // Sync all models
-        await database.sync({ alter: true });
-        console.log(chalk.blue('📊 Database models synchronized.'));
-        
-        return true;
-    } catch (error) {
-        console.error(chalk.red('❌ Unable to connect to the database:'), error.message);
-        
-        // Advanced error handling
-        if (error.name === 'SequelizeConnectionError') {
-            console.error(chalk.yellow('🔄 Retrying database connection in 5 seconds...'));
-            setTimeout(connectDatabase, 5000);
-        } else if (error.name === 'SequelizeAccessDeniedError') {
-            console.error(chalk.red('🚫 Database access denied. Check credentials.'));
+        const db = await connectMongoDB();
+        if (db) {
+            logger.success('✅ Database connection established successfully.');
+            return true;
         } else {
-            console.error(chalk.red('💥 Unexpected database error:'), error);
+            logger.warn('⚠️ MongoDB connection could not be established. Operating in fallback mode.');
+            return false;
         }
-        
+    } catch (error) {
+        logger.error('❌ Unable to connect to the database:', error.message);
         return false;
     }
 };
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-    console.log(chalk.yellow('\n🔄 Gracefully shutting down database connection...'));
-    await database.close();
-    console.log(chalk.green('✅ Database connection closed.'));
+    logger.info('\n🔄 Gracefully shutting down database connection...');
+    await closeMongoDB();
     process.exit(0);
 });
 
-module.exports = { database, connectDatabase };
+module.exports = { connectDatabase, getMongoStatus };

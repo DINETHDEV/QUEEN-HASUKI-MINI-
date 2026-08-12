@@ -1,0 +1,68 @@
+{
+  "name": "queen-mini",
+  "version": "2.0.0",
+  "description": "NovaX Bot — Advanced WhatsApp Bot Management System",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "migrate:mongo": "node scripts/migrate-to-mongodb.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@itsliaaa/baileys": "^0.3.18-final",
+    "@octokit/rest": "^20.0.2",
+    "axios": "^1.2.5",
+    "bcryptjs": "^2.4.3",
+    "chalk": "^4.1.2",
+    "cheerio": "^1.1.2",
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "denethdev-ytmp3": "^1.0.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.1.5",
+    "express-session": "^1.17.3",
+    "fluent-ffmpeg": "^2.1.3",
+    "fs-extra": "^11.2.0",
+    "helmet": "^7.1.0",
+    "jimp": "^1.6.0",
+    "jsonwebtoken": "^9.0.2",
+    "moment-timezone": "^0.6.0",
+    "mongodb": "^6.5.0",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^2.6.7",
+    "node-webpmux": "^3.1.7",
+    "nodemailer": "^6.9.7",
+    "pg": "^8.11.3",
+    "pg-hstore": "^2.3.4",
+    "pino": "^8.17.0",
+    "qrcode": "^1.5.3",
+    "qs": "^6.14.0",
+    "sequelize": "^6.35.2",
+    "sharp": "^0.33.3",
+    "socket.io": "^4.7.4",
+    "sqlite3": "^5.1.6",
+    "uuid": "^9.0.1",
+    "yt-search": "^2.12.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "whatsapp",
+    "bot",
+    "multi-device",
+    "baileys",
+    "novax",
+    "queen-mini",
+    "web-app"
+  ],
+  "author": "Dineth Sudarshana",
+  "license": "MIT"
+}

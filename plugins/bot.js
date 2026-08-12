@@ -1,5 +1,5 @@
 /**
- * Plugin Loader for QUEEN-MINI
+ * Plugin Loader for NovaX Mini
  * Copyright © 2025 Zero Bug Zone
  */
 

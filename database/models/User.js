@@ -1,127 +1,162 @@
 /**
- * User Model
- * Copyright © 2025 DarkSide Developers
+ * User Model — MongoDB Adapter
+ * Copyright © 2025 DarkSide Developers & Zero Bug Zone
  */
 
-const { DataTypes } = require('sequelize');
-const { database } = require('../connection');
+'use strict';
+
+const { getMongoDB } = require('../../lib/mongodb');
 const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
 
-const User = database.define('User', {
-    id: {
-        type: DataTypes.UUID,
-        defaultValue: DataTypes.UUIDV4,
-        primaryKey: true
-    },
-    username: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        unique: true,
-        validate: {
-            len: [3, 30],
-            isAlphanumeric: true
-        }
-    },
-    email: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        unique: true,
-        validate: {
-            isEmail: true
-        }
-    },
-    password: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        validate: {
-            len: [6, 100]
-        }
-    },
-    firstName: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        validate: {
-            len: [2, 50]
-        }
-    },
-    lastName: {
-        type: DataTypes.STRING,
-        allowNull: false,
-        validate: {
-            len: [2, 50]
-        }
-    },
-    phoneNumber: {
-        type: DataTypes.STRING,
-        allowNull: true,
-        validate: {
-            isNumeric: true,
-            len: [10, 15]
-        }
-    },
-    isActive: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: true
-    },
-    isBanned: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false
-    },
-    isAdmin: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false
-    },
-    emailVerified: {
-        type: DataTypes.BOOLEAN,
-        defaultValue: false
-    },
-    emailVerificationToken: {
-        type: DataTypes.STRING,
-        allowNull: true
-    },
-    resetPasswordToken: {
-        type: DataTypes.STRING,
-        allowNull: true
-    },
-    resetPasswordExpires: {
-        type: DataTypes.DATE,
-        allowNull: true
-    },
-    lastLogin: {
-        type: DataTypes.DATE,
-        allowNull: true
-    },
-    theme: {
-        type: DataTypes.ENUM('light', 'dark'),
-        defaultValue: 'dark'
-    },
-    avatar: {
-        type: DataTypes.STRING,
-        allowNull: true
-    }
-}, {
-    timestamps: true,
-    hooks: {
-        beforeCreate: async (user) => {
-            if (user.password) {
-                user.password = await bcrypt.hash(user.password, 12);
-            }
-        },
-        beforeUpdate: async (user) => {
-            if (user.changed('password')) {
-                user.password = await bcrypt.hash(user.password, 12);
-            }
+function getCollection() {
+    const db = getMongoDB();
+    return db ? db.collection('users') : null;
+}
+
+class UserDoc {
+    constructor(data) {
+        Object.assign(this, data);
+        if (this._id && !this.id) {
+            this.id = this._id.toString();
         }
     }
-});
 
-// Instance methods
-User.prototype.comparePassword = async function(candidatePassword) {
-    return await bcrypt.compare(candidatePassword, this.password);
+    async comparePassword(candidatePassword) {
+        if (!this.password) return false;
+        return await bcrypt.compare(candidatePassword, this.password);
+    }
+
+    getFullName() {
+        return `${this.firstName || ''} ${this.lastName || ''}`.trim();
+    }
+
+    async update(updateFields) {
+        const col = getCollection();
+        if (!col) return this;
+
+        if (updateFields.password) {
+            updateFields.password = await bcrypt.hash(updateFields.password, 12);
+        }
+
+        updateFields.updatedAt = new Date();
+        const query = this.id ? { id: this.id } : { _id: this._id };
+        await col.updateOne(query, { $set: updateFields });
+
+        Object.assign(this, updateFields);
+        return this;
+    }
+}
+
+const User = {
+    async create(data) {
+        const col = getCollection();
+        if (!col) throw new Error('MongoDB is not connected');
+
+        const now = new Date();
+        const doc = {
+            id: data.id || uuidv4(),
+            username: data.username,
+            email: data.email,
+            password: data.password ? await bcrypt.hash(data.password, 12) : null,
+            firstName: data.firstName || '',
+            lastName: data.lastName || '',
+            phoneNumber: data.phoneNumber || null,
+            isActive: data.isActive !== undefined ? data.isActive : true,
+            isBanned: data.isBanned !== undefined ? data.isBanned : false,
+            isAdmin: data.isAdmin !== undefined ? data.isAdmin : false,
+            emailVerified: data.emailVerified !== undefined ? data.emailVerified : false,
+            emailVerificationToken: data.emailVerificationToken || null,
+            resetPasswordToken: data.resetPasswordToken || null,
+            resetPasswordExpires: data.resetPasswordExpires || null,
+            lastLogin: data.lastLogin || null,
+            theme: data.theme || 'dark',
+            avatar: data.avatar || null,
+            createdAt: now,
+            updatedAt: now,
+        };
+
+        await col.insertOne(doc);
+        return new UserDoc(doc);
+    },
+
+    async findOne(query = {}) {
+        const col = getCollection();
+        if (!col) return null;
+
+        let filter = {};
+        if (query.where) {
+            filter = translateQuery(query.where);
+        } else {
+            filter = query;
+        }
+
+        const doc = await col.findOne(filter);
+        return doc ? new UserDoc(doc) : null;
+    },
+
+    async findByPk(id) {
+        return this.findOne({ id });
+    },
+
+    async findById(id) {
+        return this.findOne({ id });
+    },
+
+    async count(query = {}) {
+        const col = getCollection();
+        if (!col) return 0;
+        const filter = query.where ? translateQuery(query.where) : query;
+        return await col.countDocuments(filter);
+    },
+
+    async findAll(query = {}) {
+        const col = getCollection();
+        if (!col) return [];
+
+        const filter = query.where ? translateQuery(query.where) : {};
+        let cursor = col.find(filter);
+
+        if (query.order) {
+            const sort = {};
+            query.order.forEach(([col, dir]) => { sort[col] = dir.toUpperCase() === 'DESC' ? -1 : 1; });
+            cursor = cursor.sort(sort);
+        }
+
+        if (query.limit) cursor = cursor.limit(parseInt(query.limit));
+        if (query.offset) cursor = cursor.skip(parseInt(query.offset));
+
+        const docs = await cursor.toArray();
+        return docs.map(d => new UserDoc(d));
+    },
+
+    async findAndCountAll(query = {}) {
+        const count = await this.count(query);
+        const rows = await this.findAll(query);
+        return { count, rows };
+    }
 };
 
-User.prototype.getFullName = function() {
-    return `${this.firstName} ${this.lastName}`;
-};
+/**
+ * Translate simple query objects (handling basic Sequelize Op conversions if needed)
+ */
+function translateQuery(where) {
+    if (!where) return {};
+    const mongoQuery = {};
+
+    for (const [key, val] of Object.entries(where)) {
+        if (key === 'id' || key === 'email' || key === 'username' || key === 'isBanned' || key === 'isAdmin') {
+            mongoQuery[key] = val;
+        } else if (typeof key === 'symbol' || key === 'Symbol(or)' || key.includes('or')) {
+            // Support basic OR
+            if (Array.isArray(val)) {
+                mongoQuery.$or = val.map(item => translateQuery(item));
+            }
+        } else {
+            mongoQuery[key] = val;
+        }
+    }
+    return mongoQuery;
+}
 
 module.exports = User;

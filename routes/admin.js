@@ -1,10 +1,11 @@
 /**
- * Admin Routes
- * Copyright © 2025 DarkSide Developers
+ * Admin Routes (MongoDB)
+ * Copyright © 2025 DarkSide Developers & Zero Bug Zone
  */
 
+'use strict';
+
 const express = require('express');
-const { Op } = require('sequelize');
 const { User, Bot } = require('../database/models');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
@@ -20,18 +21,13 @@ router.get('/dashboard', authenticateToken, requireAdmin, async (req, res) => {
 
         const recentUsers = await User.findAll({
             limit: 10,
-            order: [['createdAt', 'DESC']],
-            attributes: ['id', 'username', 'email', 'createdAt', 'isActive', 'isBanned']
+            order: [['createdAt', 'DESC']]
         });
 
         const recentBots = await Bot.findAll({
             limit: 10,
             order: [['createdAt', 'DESC']],
-            include: [{
-                model: User,
-                as: 'user',
-                attributes: ['username', 'email']
-            }]
+            include: true
         });
 
         res.json({
@@ -63,11 +59,11 @@ router.get('/users', authenticateToken, requireAdmin, async (req, res) => {
         const offset = (page - 1) * limit;
 
         const whereClause = search ? {
-            [Op.or]: [
-                { username: { [Op.iLike]: `%${search}%` } },
-                { email: { [Op.iLike]: `%${search}%` } },
-                { firstName: { [Op.iLike]: `%${search}%` } },
-                { lastName: { [Op.iLike]: `%${search}%` } }
+            $or: [
+                { username: { $regex: search, $options: 'i' } },
+                { email: { $regex: search, $options: 'i' } },
+                { firstName: { $regex: search, $options: 'i' } },
+                { lastName: { $regex: search, $options: 'i' } }
             ]
         } : {};
 
@@ -75,13 +71,7 @@ router.get('/users', authenticateToken, requireAdmin, async (req, res) => {
             where: whereClause,
             limit: parseInt(limit),
             offset: parseInt(offset),
-            order: [['createdAt', 'DESC']],
-            attributes: { exclude: ['password'] },
-            include: [{
-                model: Bot,
-                as: 'bots',
-                attributes: ['id', 'phoneNumber', 'status', 'createdAt']
-            }]
+            order: [['createdAt', 'DESC']]
         });
 
         res.json({
@@ -109,7 +99,7 @@ router.get('/users', authenticateToken, requireAdmin, async (req, res) => {
 router.put('/users/:userId/ban', authenticateToken, requireAdmin, async (req, res) => {
     try {
         const { userId } = req.params;
-        const { banned, reason } = req.body;
+        const { banned } = req.body;
 
         const user = await User.findByPk(userId);
         if (!user) {
@@ -162,11 +152,7 @@ router.get('/bots', authenticateToken, requireAdmin, async (req, res) => {
             limit: parseInt(limit),
             offset: parseInt(offset),
             order: [['createdAt', 'DESC']],
-            include: [{
-                model: User,
-                as: 'user',
-                attributes: ['id', 'username', 'email', 'firstName', 'lastName']
-            }]
+            include: true
         });
 
         res.json({
@@ -205,11 +191,12 @@ router.put('/bots/:botId/disconnect', authenticateToken, requireAdmin, async (re
 
         await bot.update({ status: 'disconnected' });
 
-        // Emit real-time update
-        global.io.to(`user_${bot.userId}`).emit('bot_status_update', {
-            botId: bot.id,
-            status: 'disconnected'
-        });
+        if (global.io) {
+            global.io.to(`user_${bot.userId}`).emit('bot_status_update', {
+                botId: bot.id,
+                status: 'disconnected'
+            });
+        }
 
         res.json({
             success: true,

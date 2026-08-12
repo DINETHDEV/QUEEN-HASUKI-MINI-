@@ -1,49 +1,65 @@
-/**
- * Ping Command Plugin (QUEEN HASUKI)
- * Copyright © 2025 Zero Bug Zone
- */
+const { cmd } = require('../NovaX_Mini');
+const { sleep } = require('../lib/functions');
+const { sendInteractive, qr, url } = require('../lib/interactive');
+const config = require('../config');
+const os = require('os');
 
-module.exports = async (socket, msg, bot) => {
+const { getLang } = require('../lib/lang');
+const { getUserLanguage } = require('../lib/database');
+
+cmd({
+    pattern: 'ping',
+    desc: 'Live ping speed monitor',
+    category: 'main',
+    react: '⚡',
+    filename: __filename
+}, async (conn,  mek,  m, { from, sender, reply, quoted, text }) => {
     try {
+        // Resolve per-user language at runtime
+        let userLangCode = await getUserLanguage(sender);
+        if (!userLangCode) userLangCode = (config.LANGUAGE || 'en').toLowerCase();
+        const lang = getLang(userLangCode);
+
+        await conn.sendMessage(from, { react: { text: '⚡', key: m.key } });
+
         const start = Date.now();
-        
-        // Send initial ping message
-        const pingMsg = await socket.sendMessage(msg.key.remoteJid, {
-            text: '🏓 Pinging QUEEN HASUKI...'
-        }, { quoted: msg });
+        await sleep(50);
+        const ping = Date.now() - start;
 
-        const end = Date.now();
-        const latency = end - start;
+        const totalMem = (os.totalmem() / 1024 / 1024).toFixed(0);
+        const freeMem  = (os.freemem()  / 1024 / 1024).toFixed(0);
+        const usedMem  = (totalMem - freeMem);
+        const cpus     = os.cpus();
+        const platform = os.platform();
+        const prefix   = config.PREFIX || '.';
 
-        const pongMessage = `
-╔════════════════════╗
-       🏓 *PONG!*  
-╚════════════════════╝
+        const body =
+            `╭━━━〔 *${lang.PING_TITLE}* 〕━━━┈\n` +
+            `┃ 🏓 *${lang.PING_RES}:* ${ping}ms\n` +
+            `┃ 💾 *RAM:* ${usedMem}MB / ${totalMem}MB\n` +
+            `┃ 🖥️ *${lang.PING_CPU}:* ${cpus[0]?.model?.substring(0, 30) || 'Unknown'}\n` +
+            `┃ 🔧 *${lang.PING_PLATFORM}:* ${platform}\n` +
+            `┃ 🟢 *${lang.PING_STATUS}:* ${lang.PING_ONLINE}\n` +
+            `╰━━━━━━━━━━━━━━━┈`;
 
-⚡ *Latency:* ${latency}ms  
-🤖 *Bot:* ${bot.botName}  
-📱 *Status:* ✅ Online & Active  
-
-━━━━━━━━━━━━━━━━
-✨ Powered by *Zero Bug Zone*  
-👑 Owner: *Dineth Sudarshana*
-━━━━━━━━━━━━━━━━
-        `.trim();
-
-        await socket.sendMessage(msg.key.remoteJid, {
-            text: pongMessage,
-            edit: pingMsg.key
+        await sendInteractive(conn, from, mek, {
+            imageUrl: config.IMAGE_PATH,
+            body,
+            footer: config.BOT_FOOTER,
+            buttons: [
+                qr(lang.MENU_BTN, `${prefix}menu`),
+                qr(lang.ALIVE_BTN, `${prefix}alive`),
+                qr(lang.PING_REFRESH, `${prefix}ping`),
+            ]
         });
 
-        // Update statistics
-        const stats = bot.statistics || {};
-        stats.messagesSent = (stats.messagesSent || 0) + 1;
-        await bot.update({ statistics: stats });
+        await conn.sendMessage(from, { react: { text: '✅', key: m.key } });
 
-    } catch (error) {
-        console.error('Ping command error:', error);
-        await socket.sendMessage(msg.key.remoteJid, {
-            text: '❌ Error executing ping command'
-        }, { quoted: msg });
+    } catch (e) {
+        console.error('Ping Error:', e);
+        await conn.sendMessage(from, { react: { text: '❌', key: m.key } });
+        return conn.sendMessage(from, {
+            text: `╭━━━〔 *❌ ɴᴏᴠᴀ_x ᴍɪɴɪ* 〕━━━┈\n┃ *Ping failed — please try again.*\n╰━━━━━━━━━━━━━━━┈`
+        }, { quoted: mek });
     }
-};
+});

@@ -1,5 +1,5 @@
 /**
- * Command Register System (QUEEN HASUKI)
+ * Command Register System (NovaX Mini)
  * Copyright © 2025 Zero Bug Zone
  */
 

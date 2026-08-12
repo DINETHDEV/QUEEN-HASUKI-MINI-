@@ -1,8 +1,12 @@
 /**
- * QUEEN-MINI Main Server + WhatsApp Bot
- * Copyright © 2025 DarkSide Developers
- * Owner: DarkWinzo
+ * NovaX Mini — Main Server + WhatsApp Bot
+ * Copyright © 2025 Zero Bug Zone
+ * Owner: Dineth Sudarshana
  */
+
+'use strict';
+
+require('dotenv').config();
 
 const express = require('express');
 const http = require('http');
@@ -15,14 +19,15 @@ const chalk = require('chalk');
 const fs = require('fs');
 
 const config = require('./config');
+const logger = require('./lib/logger');
 const { connectDatabase } = require('./database/connection');
 const { generalLimiter } = require('./middleware/rateLimiter');
-const { loadPlugins } = require('./plugins/bot'); // ✅ Plugin loader path fixed
+const pluginManager = require('./lib/pluginManager');
 
 // ===== EXPRESS SERVER =====
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, { cors: { origin: "*", methods: ["GET","POST"] } });
+const io = socketIo(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
@@ -32,7 +37,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(generalLimiter);
 
-// Static
+// Static files
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -45,122 +50,64 @@ app.use('/api/user', require('./routes/user'));
 // Serve main page
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-// 404 & error
+// 404 & Error Handler
 app.use('*', (req, res) => res.status(404).json({ success: false, message: 'Route not found' }));
 app.use((err, req, res, next) => {
-  console.error(chalk.red('Server Error:'), err);
-  res.status(500).json({ success: false, message: 'Internal server error' });
+    logger.error('Server Error:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
 });
 
 // Socket.IO for real-time
 global.io = io;
 io.on('connection', socket => {
-  console.log(chalk.blue('Client connected:'), socket.id);
-  socket.on('disconnect', () => console.log(chalk.yellow('Client disconnected:'), socket.id));
+    logger.info('Web client connected:', socket.id);
+    socket.on('disconnect', () => logger.info('Web client disconnected:', socket.id));
 });
 
 // ===== WHATSAPP BOT =====
-const prefix = '.';
-const ownerNumber = ['94789737967'];
 const credsFolder = path.join(__dirname, 'auth_info_baileys');
 
 // Initialize global commands
 if (!global.commands) global.commands = [];
 
+const { initSocket } = require('./services/botService');
+
 async function startBot() {
-  // ✅ Dynamic import Baileys
-  const baileys = await import('@whiskeysockets/baileys');
-  const makeWASocket = baileys.default;
-  const {
-    useMultiFileAuthState,
-    getContentType,
-    fetchLatestBaileysVersion,
-    DisconnectReason,
-    Browsers
-  } = baileys;
-
-  const { state, saveCreds } = await useMultiFileAuthState(credsFolder);
-  const { version } = await fetchLatestBaileysVersion();
-
-  const sock = makeWASocket({
-    logger: { level: 'silent' },
-    printQRInTerminal: true,
-    browser: Browsers.macOS('Firefox'),
-    auth: state,
-    version,
-    syncFullHistory: true
-  });
-
-  sock.ev.on('connection.update', async update => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) startBot();
-      else console.error('❌ Logged out from WhatsApp, delete auth folder to relogin.');
-    } else if (connection === 'open') {
-      console.log('✅ Bot connected');
-      // Load all plugins after bot connects
-      loadPlugins();
-    }
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  // Messages handler
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-    if (!messages || !messages.length) return;
-    const mek = messages[0];
-    if (!mek?.message || mek.key.remoteJid === 'status@broadcast') return;
-
-    mek.message = getContentType(mek.message) === 'ephemeralMessage'
-      ? mek.message.ephemeralMessage.message
-      : mek.message;
-
-    const type = getContentType(mek.message);
-    const from = mek.key.remoteJid;
-    const body =
-      type === 'conversation'
-        ? mek.message.conversation
-        : mek.message[type]?.text || mek.message[type]?.caption || '';
-
-    if (!body.startsWith(prefix)) return;
-
-    const commandName = body.slice(prefix.length).trim().split(' ')[0].toLowerCase();
-    const args = body.trim().split(/ +/).slice(1);
-    const q = args.join(' ');
-
-    const sender = mek.key.fromMe ? sock.user.id : (mek.key.participant || mek.key.remoteJid);
-    const isOwner = ownerNumber.includes((sender || '').split('@')[0]);
-    const reply = text => sock.sendMessage(from, { text }, { quoted: mek });
-
-    const cmd = global.commands.find(c => c.pattern === commandName);
-    if (cmd) {
-      try {
-        await cmd.function(sock, mek, { from, body, args, q, isOwner, reply });
-      } catch (err) {
-        console.error('[PLUGIN ERROR]', err);
-        await reply('❌ Error executing command');
-      }
-    }
-  });
-
-  return sock;
+    return await initSocket();
 }
 
 // ===== START SERVER =====
 const startServer = async () => {
-  try {
-    await connectDatabase();
-    await startBot();
+    try {
+        // ──────────────────────────────────────────────────
+        console.log('');
+        console.log('  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓');
+        console.log('  ┃                                    ┃');
+        console.log('  ┃      N O V A  X   M I N I         ┃');
+        console.log('  ┃         v3.0.0 by ZeroBugZone      ┃');
+        console.log('  ┃                                    ┃');
+        console.log('  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛');
+        console.log('');
 
-    const PORT = config.PORT || 8000;
-    server.listen(PORT, () =>
-      console.log(chalk.green(`QUEEN-MINI running at http://localhost:${PORT}`))
-    );
-  } catch (err) {
-    console.error(chalk.red('Failed to start server:'), err);
-    process.exit(1);
-  }
+        await connectDatabase();
+        await startBot();
+
+        const PORT = config.PORT || 5000;
+        server.listen(PORT, () => {
+            logger.success(`🚀 NovaX Mini running at http://localhost:${PORT}`);
+            console.log('');
+            console.log('  ╔══════════════════════════════════╗');
+            console.log('  ║  🟢 Status   : ONLINE                  ║');
+            console.log(`  ║  🖥️  Web      : http://localhost:${PORT}    ║`);
+            console.log('  ║  💿 Database  : MongoDB                  ║');
+            console.log('  ║  🔌 WhatsApp  : Initializing...          ║');
+            console.log('  ╚══════════════════════════════════╝');
+            console.log('');
+        });
+    } catch (err) {
+        logger.error('Failed to start server:', err);
+        process.exit(1);
+    }
 };
 
 // Graceful shutdown

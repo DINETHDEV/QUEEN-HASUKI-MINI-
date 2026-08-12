@@ -1,33 +1,41 @@
 /**
- * Menu Plugin (QUEEN HASUKI MINI) - Interactive Template Version
- * Works on Baileys v6+
+ * Menu Plugin (NovaX Mini) - Interactive Version
+ * Powered by @itsliaaa/baileys
  */
 
-const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
+const { sendInteractive, qr } = require('../lib/interactive');
+const config = require('../config');
 
 module.exports = async (socket, msg, bot) => {
     try {
-        const prefix = (bot.settings && bot.settings.prefix) ? bot.settings.prefix : '.';
+        const prefix = (bot && bot.settings && bot.settings.prefix) ? bot.settings.prefix : (config.PREFIX || '.');
+        const botName = bot ? (bot.botName || config.BOT_NAME || 'NovaX Mini') : (config.BOT_NAME || 'NovaX Mini');
+        const version = config.BOT_VERSION || '3.0.0';
 
-        const menuText = `👑 *QUEEN HASUKI MINI* 👑
-Advanced Bot System
+        const menuText = `⚡ *${botName}* ⚡
+Advanced WhatsApp Bot
 
-🤖 BOT INFO
-• Name: ${bot.botName || 'Unknown'}
-• Version: 2.0.0
+🤖 *BOT INFO*
+• Name: ${botName}
+• Version: v${version}
 • Prefix: ${prefix}
-• Status: Active`;
+• Status: Online ✅`;
 
-        const buttons = [
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Alive', id: `${prefix}alive` }) },
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Help', id: `${prefix}help` }) },
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Ping', id: `${prefix}ping` }) },
-            { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: 'Settings', id: `${prefix}settings` }) },
-        ];
+        await sendInteractive(socket, msg.key.remoteJid, msg, {
+            title: '👑 NovaX Mini Menu',
+            body: menuText,
+            footer: '© 2025 Zero Bug Zone',
+            buttons: [
+                qr('⚡ Alive', `${prefix}alive`),
+                qr('🏓 Ping', `${prefix}ping`),
+                qr('📋 All Menu', `${prefix}allmenu`),
+            ]
+        });
 
-        const msgContent = generateWAMessageFromContent(msg.key.remoteJid, {
-            viewOnceMessage: {
-                message: {
-                    interactiveMessage: proto.Message.InteractiveMessage.create({
-                        body: proto.Message.InteractiveMessage.Body.create({
-                            text: menuText
+    } catch (error) {
+        console.error('Menu command error:', error);
+        await socket.sendMessage(msg.key.remoteJid, {
+            text: '❌ Error executing menu command'
+        }, { quoted: msg });
+    }
+};

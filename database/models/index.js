@@ -1,16 +1,11 @@
 /**
- * Database Models Index
- * Copyright © 2025 DarkSide Developers
+ * NovaX Bot — Database Models Index
+ * Copyright © 2025 Zero Bug Zone
  */
 
-const User = require('./User');
-const Bot = require('./Bot');
+const User     = require('./User');
+const Bot      = require('./Bot');
+const Settings = require('./Settings');
+const UserLang = require('./UserLang');
 
-// Define associations
-User.hasMany(Bot, { foreignKey: 'userId', as: 'bots' });
-Bot.belongsTo(User, { foreignKey: 'userId', as: 'user' });
-
-module.exports = {
-    User,
-    Bot
-};
+module.exports = { User, Bot, Settings, UserLang };

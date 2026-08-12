@@ -1,55 +1,59 @@
-/**
- * Owner Info Command Plugin with Button
- * Copyright © 2025 Zero Bug Zone
- */
+const { cmd } = require('../NovaX_Mini');
+const config = require('../config');
+const { sendInteractive, qr, url } = require('../lib/interactive');
 
-module.exports = async (socket, msg, bot) => {
+cmd({
+    pattern: 'owner',
+    alias: ['ownerinfo', 'ownercontact'],
+    desc: 'Get owner contact information',
+    category: 'general',
+    react: '👑',
+    filename: __filename
+}, async (conn,  mek,  m, { from, reply, myquoted, quoted, text }) => {
     try {
-        const from = msg.key.remoteJid;
+        const ownerNumber = (config.OWNER_NUMBER || '').replace(/[^0-9]/g, '');
+        const prefix = config.PREFIX || '.';
+
+        await conn.sendMessage(from, { react: { text: '⏳', key: mek.key } });
+
+        const vcard =
+            `BEGIN:VCARD\nVERSION:3.0\nFN:👑 ɴᴏᴠᴀ_x ᴍɪɴɪ ᴏᴡɴᴇʀ\nORG:ɴᴏᴠᴀ_x ᴍɪɴɪ ᴏꜰꜰɪᴄɪᴀʟ;\nTEL;type=CELL;type=VOICE;waid=${ownerNumber}:+${ownerNumber}\nEND:VCARD`;
+
         const body =
-            msg.message.conversation ||
-            msg.message.extendedTextMessage?.text ||
-            '';
+            `╭━━━〔 *👑 ɴᴏᴠᴀ_x ᴍɪɴɪ ᴏᴡɴᴇʀ* 〕━━━┈\n` +
+            `┃ 👤 *Owner:* Dineth Sudarshana\n` +
+            `┃ 🇱🇰 *Country:* Sri Lanka\n` +
+            `┃ 📱 *Number:* +${ownerNumber}\n` +
+            `┃ 🐙 *GitHub:* DINETHDEV\n` +
+            `┃ 🤖 *Bot:* ɴᴏᴠᴀ_x ᴍɪɴɪ\n` +
+            `╰━━━━━━━━━━━━━━━┈\n\n` +
+            `Tap buttons below to connect 👇`;
 
-        // Trigger: .owner
-        if (!body.toLowerCase().startsWith('.owner')) return;
+        await sendInteractive(conn, from, mek, {
+            imageUrl: config.IMAGE_PATH,
+            body,
+            footer: config.BOT_FOOTER,
+            buttons: [
+                ownerNumber ? url('💬 Contact Owner', `https://wa.me/${ownerNumber}`) : null,
+                url('🐙 GitHub', 'https://github.com/DINETHDEV'),
+                url('📢 Channel', config.CHANNEL_LINK || 'https://whatsapp.com/channel/0029VbCZl6wBPzjczwuKpm1A'),
+                qr('📋 Menu', `${prefix}menu`)
+            ].filter(Boolean)
+        });
 
-        const ownerText = `
-👑 *OWNER INFO*
-
-🤖 Bot: ${bot.name || 'QUEEN-HASUKI'}  
-👤 Owner: Dineth Sudarshana  
-📧 Email: your.email@example.com  
-📱 Status: ✅ Online & Active
-        `.trim();
-
-        // Define button
-        const buttons = [
-            {
-                buttonId: 'contact_owner',
-                buttonText: { displayText: '📞 Contact Owner' },
-                type: 1
+        // Send contact card
+        await conn.sendMessage(from, {
+            contacts: {
+                displayName: '👑 Dineth Sudarshana',
+                contacts: [{ vcard }]
             }
-        ];
+        }, { quoted: myquoted || mek });
 
-        const buttonMessage = {
-            text: ownerText,
-            buttons: buttons,
-            headerType: 1,
-            footerText: '✨ Powered by Zero Bug Zone'
-        };
+        await conn.sendMessage(from, { react: { text: '✅', key: mek.key } });
 
-        await socket.sendMessage(from, buttonMessage, { quoted: msg });
-
-        // Update bot statistics
-        const stats = bot.statistics || {};
-        stats.commandsExecuted = (stats.commandsExecuted || 0) + 1;
-        await bot.update({ statistics: stats });
-
-    } catch (error) {
-        console.error('Owner plugin error:', error);
-        await socket.sendMessage(msg.key.remoteJid, {
-            text: '❌ Error executing owner command'
-        }, { quoted: msg });
+    } catch (e) {
+        console.error('OWNER CMD ERROR:', e);
+        await conn.sendMessage(from, { react: { text: '❌', key: mek.key } });
+        reply(`╭━━━〔 *❌ ɴᴏᴠᴀ_x ᴍɪɴɪ* 〕━━━┈\n┃ *Error: ${e.message}*\n╰━━━━━━━━━━━━━━━┈`);
     }
-};
+});
