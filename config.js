@@ -31,9 +31,19 @@ module.exports = {
     EMAIL_PASS: process.env.EMAIL_PASS || '',
     EMAIL_FROM: process.env.EMAIL_FROM || 'NovaX Bot <noreply@novax.bot>',
 
-    // ── Admin ────────────────────────────────────────────
+    // ── Admin ────────────────────────────────────────────────
     ADMIN_EMAIL:    process.env.ADMIN_EMAIL    || 'admin@novax-mini.com',
     ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin123',
+
+    // ── Google OAuth 2.0 ─────────────────────────────────────
+    GOOGLE_CLIENT_ID:     process.env.GOOGLE_CLIENT_ID     || '',
+    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || '',
+    GOOGLE_CALLBACK_URL:  process.env.GOOGLE_CALLBACK_URL  || 'http://localhost:5000/auth/google/callback',
+    // Comma-separated list of emails that are granted admin on first Google login
+    GOOGLE_ADMIN_EMAILS:  process.env.GOOGLE_ADMIN_EMAILS  || '',
+
+    // ── Session (used only for OAuth state handshake) ─────────
+    SESSION_SECRET: process.env.SESSION_SECRET || 'novax-session-secret-change-me',
 
     // ── WhatsApp Bot ───────────────────────────────────
     BOT_NAME:        process.env.BOT_NAME        || 'NovaX Mini',

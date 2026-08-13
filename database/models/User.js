@@ -72,6 +72,9 @@ const User = {
             lastLogin: data.lastLogin || null,
             theme: data.theme || 'dark',
             avatar: data.avatar || null,
+            // ── Google OAuth fields ────────────────────────────────────────
+            googleId:     data.googleId     || null,
+            authProvider: data.authProvider || 'local',  // 'local' | 'google' | 'both'
             createdAt: now,
             updatedAt: now,
         };
@@ -134,6 +137,14 @@ const User = {
         const count = await this.count(query);
         const rows = await this.findAll(query);
         return { count, rows };
+    },
+
+    /**
+     * Find a user by their Google OAuth sub ID.
+     * @param {string} googleId - The Google `sub` value from the ID token.
+     */
+    async findByGoogleId(googleId) {
+        return this.findOne({ googleId });
     }
 };
 

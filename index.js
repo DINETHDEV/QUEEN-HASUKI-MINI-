@@ -14,6 +14,7 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
+const session = require('express-session');
 const path = require('path');
 const chalk = require('chalk');
 const fs = require('fs');
@@ -23,6 +24,7 @@ const logger = require('./lib/logger');
 const { connectDatabase } = require('./database/connection');
 const { generalLimiter } = require('./middleware/rateLimiter');
 const pluginManager = require('./lib/pluginManager');
+const { router: googleAuthRouter, passport } = require('./routes/authGoogle');
 
 // ===== EXPRESS SERVER =====
 const app = express();
@@ -50,9 +52,33 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(generalLimiter);
 
+// ── Session (short-lived — only used for OAuth 2.0 state handshake) ────────
+// The application itself uses JWT; this session is destroyed immediately
+// after the OAuth callback issues a JWT and redirects to the frontend.
+app.use(session({
+    secret: config.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        httpOnly: true,
+        secure:   config.NODE_ENV === 'production',
+        sameSite: 'lax',     // Required for OAuth redirect flow
+        maxAge:   5 * 60 * 1000  // 5 minutes — enough for OAuth round-trip
+    }
+}));
+
+// ── Passport (OAuth strategy middleware) ─────────────────────────────────
+app.use(passport.initialize());
+app.use(passport.session());
+
 // Static files
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// ── Google OAuth Routes (outside /api/ — browser redirects required) ─────
+// GET /auth/google          → Initiate Google consent
+// GET /auth/google/callback → Handle Google callback, issue JWT, redirect
+app.use('/auth', googleAuthRouter);
 
 // API Routes
 app.use('/api/auth', require('./routes/auth'));
