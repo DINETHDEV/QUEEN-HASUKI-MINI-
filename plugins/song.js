@@ -1,18 +1,19 @@
 /**
- * NovaX Mini — Song Downloader Plugin (Fixed)
+ * NovaX Mini — Song Downloader Plugin
  *
  * BUGS FIXED:
- *   1. Removed `errMsg` from interactive.js import (didn't exist → crash on load).
- *   2. Uses result.tempFile (local disk file) instead of result.url for audio send.
- *   3. Added proper cleanup in finally block.
- *   4. Added structured logging for each stage.
- *   5. Added reaction status updates throughout.
+ *   1. Removed dead import of `safeSendPluginError` (imported but never used).
+ *   2. data.thumbnail from yt-search is an object { url, width, height } — not
+ *      a plain string. Fixed: safely extract .url with a fallback to IMAGE_PATH.
+ *   3. data.views from yt-search is a plain number — formatted with
+ *      toLocaleString() for display.
  *
  * Commands:
- *   .song  <name|URL>  — search and show format selection
- *   .play  <name|URL>  — alias for .song
- *   .asong <ytURL>     — download as audio (mp3, playable)
- *   .dsong <ytURL>     — download as document (mp3 file)
+ *   .song  <name|URL>  — search YouTube and show format selection menu
+ *   .play  <name|URL>  — alias
+ *   .music <name|URL>  — alias
+ *   .asong <ytURL>     — download and send as playable audio
+ *   .dsong <ytURL>     — download and send as document (mp3 file)
  *
  * Copyright © 2025 Zero Bug Zone
  */
@@ -24,10 +25,10 @@ const config            = require('../config');
 const yts               = require('yt-search');
 const fs                = require('fs');
 const logger            = require('../lib/logger');
-const { downloadAudio, cleanupAudio } = require('../lib/ytmp3');
-const { sendInteractive, qr, url }    = require('../lib/interactive');
-const { getUserLanguage }              = require('../lib/database');
-const { safeSendReaction, safeSendPluginError } = require('../lib/safeSend');
+const { downloadAudio, cleanupAudio }   = require('../lib/ytmp3');
+const { sendInteractive, qr, url }      = require('../lib/interactive');
+const { getUserLanguage }               = require('../lib/database');
+const { safeSendReaction }              = require('../lib/safeSend');
 
 // ── Per-language strings ──────────────────────────────────────────────────────
 const SONG_STRINGS = {
@@ -43,10 +44,8 @@ const SONG_STRINGS = {
         AUDIO_BTN:     '🎵 Audio (MP3)',
         DOC_BTN:       '📄 Document (MP3)',
         OPEN_YT_BTN:   '▶️ Open on YouTube',
-        SEARCHING:     '🔎 Searching...',
         DOWNLOADING:   '⬇️ Downloading audio… Please wait.',
         FAILED:        '❌ Download failed.',
-        TOO_LONG:      '❌ This video is too long to download (max 10 minutes).',
     },
     si: {
         USAGE:         '❌ කරුණාකර ගීතයේ නම හෝ YouTube URL ලබා දෙන්න.\nඋදාහරණ: .song <නම හෝ URL>',
@@ -60,35 +59,50 @@ const SONG_STRINGS = {
         AUDIO_BTN:     '🎵 ශ්‍රව්‍ය (MP3)',
         DOC_BTN:       '📄 ලේඛනය (MP3)',
         OPEN_YT_BTN:   '▶️ YouTube හි විවෘත කරන්න',
-        SEARCHING:     '🔎 සොයමින්...',
         DOWNLOADING:   '⬇️ ශ්‍රව්‍යය බාගත කරමින්… රැඳී සිටින්න.',
         FAILED:        '❌ බාගත කිරීම අසාර්ථකයි.',
-        TOO_LONG:      '❌ මෙම වීඩියෝව ඉතා දිගයි (උපරිම මිනිත්තු 10).',
     }
 };
 
+/** Get translated string, falling back through English. */
 function ts(lang, key) {
     const map = SONG_STRINGS[(lang || 'en').toLowerCase()] || SONG_STRINGS.en;
     return map[key] || SONG_STRINGS.en[key] || key;
 }
 
-// ── Error helper ──────────────────────────────────────────────────────────────
+// ── Error helper (matches fb.js / tiktokdl.js style) ─────────────────────────
 const sendErr = async (conn, mek, from, text) =>
-    conn.sendMessage(from,
+    conn.sendMessage(
+        from,
         { text: `╭━━━〔 *❌ ɴᴏᴠᴀ_x ᴍɪɴɪ* 〕━━━┈\n┃ ${text}\n╰━━━━━━━━━━━━━━━┈` },
         { quoted: mek }
     );
 
-// ── Resolve user language ─────────────────────────────────────────────────────
+// ── Resolve user language (graceful fallback) ─────────────────────────────────
 async function resolveLanguage(sender) {
-    let lang = await getUserLanguage(sender).catch(() => null);
-    if (!lang) lang = (config.LANGUAGE || 'en').toLowerCase();
-    return lang;
+    const lang = await getUserLanguage(sender).catch(() => null);
+    if (lang) return lang.toLowerCase();
+    return (config.LANGUAGE || 'en').toLowerCase();
 }
 
-// ── Search helper ─────────────────────────────────────────────────────────────
+// ── Safely extract thumbnail URL from yt-search result ───────────────────────
+/**
+ * yt-search returns thumbnail as { url, width, height } OR sometimes as a plain
+ * string in older result shapes.  This function normalises both cases.
+ *
+ * @param {string|object|null} thumb  Raw thumbnail value from yt-search
+ * @returns {string} A usable image URL (falls back to bot IMAGE_PATH)
+ */
+function resolveThumbnail(thumb) {
+    if (!thumb) return config.IMAGE_PATH;
+    if (typeof thumb === 'string') return thumb || config.IMAGE_PATH;
+    if (typeof thumb === 'object' && thumb.url) return thumb.url;
+    return config.IMAGE_PATH;
+}
+
+// ── YouTube search helper ─────────────────────────────────────────────────────
 async function searchYouTube(query) {
-    // If it's already a YouTube URL, extract video info
+    // YouTube URL — look up video directly by ID
     if (query.includes('youtube.com/watch') || query.includes('youtu.be/')) {
         const videoId = query.match(/(?:v=|youtu\.be\/)([^&?/\s]+)/)?.[1];
         if (videoId) {
@@ -96,14 +110,23 @@ async function searchYouTube(query) {
             if (result && result.title) return result;
         }
     }
-    // Otherwise text search
+
+    // Text search
     const result = await yts(query);
     if (!result || !result.all || !result.all.length) return null;
     return result.all[0];
 }
 
+// ── Format large numbers for display ─────────────────────────────────────────
+function formatViews(n) {
+    if (typeof n !== 'number' || isNaN(n)) return 'N/A';
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+    return n.toLocaleString();
+}
+
 // ============================================================
-// COMMAND: .song / .play / .music / .songdl  — Search + menu
+// COMMAND: .song / .play / .music  — Search + format menu
 // ============================================================
 
 cmd({
@@ -112,19 +135,20 @@ cmd({
     react:    '🎵',
     desc:     'Download YouTube Song',
     category: 'download',
+    use:      '.song <name or YouTube URL>',
     filename: __filename
-}, async (conn, mek, m, { q, from, sender, body }) => {
+}, async (conn, mek, m, { q, from, sender }) => {
     const prefix   = config.PREFIX || '.';
     const userLang = await resolveLanguage(sender);
 
-    logger.info(`[NovaX:SONG] Search requested by ${sender} — query: "${q}"`);
+    logger.info(`[SONG] Search requested by ${sender} — query: "${q}"`);
 
     if (!q) return sendErr(conn, mek, from, ts(userLang, 'USAGE'));
 
     try {
         await safeSendReaction(conn, from, mek, '🔍');
 
-        logger.info(`[NovaX:SONG] Searching YouTube: "${q}"`);
+        logger.info(`[SONG] Searching YouTube: "${q}"`);
         const data = await searchYouTube(q);
 
         if (!data || !data.url) {
@@ -132,19 +156,22 @@ cmd({
             return sendErr(conn, mek, from, ts(userLang, 'NOT_FOUND'));
         }
 
-        logger.info(`[NovaX:SONG] Found: "${data.title}" — ${data.url}`);
+        logger.info(`[SONG] Found: "${data.title}" — ${data.url}`);
+
+        // FIX: thumbnail may be an object { url, width, height } from yt-search
+        const thumbnailUrl = resolveThumbnail(data.thumbnail);
 
         const infoText =
             `*★ ɴᴏᴠᴀ-x ᴍɪɴɪ — ${ts(userLang, 'DOWNLOADER')} ★*\n\n` +
             ` 🎵 *${ts(userLang, 'TITLE_LABEL')}:* ${data.title}\n` +
             ` 👤 *${ts(userLang, 'CHANNEL_LABEL')}:* ${data.author?.name || 'Unknown'}\n` +
-            ` 👁️ *${ts(userLang, 'VIEWS_LABEL')}:* ${data.views || 'N/A'}\n` +
+            ` 👁️ *${ts(userLang, 'VIEWS_LABEL')}:* ${formatViews(data.views)}\n` +
             ` ⏱️ *${ts(userLang, 'DURATION_LABEL')}:* ${data.timestamp || 'N/A'}\n\n` +
             ` ────────────────────────\n` +
             ` 📥 *${ts(userLang, 'SELECT_FORMAT')}*`;
 
         await sendInteractive(conn, from, mek, {
-            imageUrl: data.thumbnail,
+            imageUrl: thumbnailUrl,
             title:    '🎵 NovaX Mini',
             body:     infoText,
             footer:   config.BOT_FOOTER,
@@ -158,7 +185,7 @@ cmd({
         await safeSendReaction(conn, from, mek, '✅');
 
     } catch (e) {
-        logger.error(`[NovaX:ERROR] Command: song | Stage: search | ${e.message}`);
+        logger.error(`[SONG] Search failed — sender: ${sender} | ${e.message}`);
         await safeSendReaction(conn, from, mek, '❌');
         return sendErr(conn, mek, from, 'Failed to search YouTube. Please try again.');
     }
@@ -169,12 +196,20 @@ cmd({
 // ============================================================
 
 /**
- * Downloads audio and sends it as audio or document.
- * Uses temp file — always cleaned up in finally.
+ * Downloads audio from a YouTube URL and sends it as audio or document.
+ * The temp file is always cleaned up in the finally block.
+ *
+ * @param {object}  conn        Baileys WASocket
+ * @param {object}  mek         Quoted message
+ * @param {string}  from        Chat JID
+ * @param {string}  sender      Sender JID
+ * @param {string}  q           YouTube URL
+ * @param {boolean} isDocument  true → send as document, false → send as audio
  */
 async function handleDownload(conn, mek, from, sender, q, isDocument) {
     const userLang = await resolveLanguage(sender);
 
+    // Validate that q looks like a YouTube URL
     if (!q || (!q.includes('youtu.be') && !q.includes('youtube.com'))) {
         return sendErr(conn, mek, from, ts(userLang, 'USAGE'));
     }
@@ -185,7 +220,7 @@ async function handleDownload(conn, mek, from, sender, q, isDocument) {
         await safeSendReaction(conn, from, mek, '⬇️');
         await conn.sendMessage(from, { text: ts(userLang, 'DOWNLOADING') }, { quoted: mek });
 
-        logger.info(`[NovaX:SONG] Downloading audio for: ${q}`);
+        logger.info(`[SONG] Downloading — mode: ${isDocument ? 'document' : 'audio'} | url: ${q}`);
         downloadResult = await downloadAudio(q);
 
         const { tempFile, title } = downloadResult;
@@ -195,9 +230,13 @@ async function handleDownload(conn, mek, from, sender, q, isDocument) {
         }
 
         const audioBuffer = fs.readFileSync(tempFile);
-        const safeTitle   = (title || 'audio').replace(/[^\w\s-]/g, '').trim() || 'audio';
 
-        logger.info(`[NovaX:SONG] Sending audio: "${safeTitle}" (${Math.round(audioBuffer.length / 1024)}KB)`);
+        // Sanitise title for use as a filename
+        const safeTitle = (title || 'audio')
+            .replace(/[^\w\s\-]/g, '')
+            .trim() || 'audio';
+
+        logger.info(`[SONG] Sending — mode: ${isDocument ? 'document' : 'audio'} | title: "${safeTitle}" | size: ${Math.round(audioBuffer.length / 1024)}KB`);
 
         if (isDocument) {
             await conn.sendMessage(from, {
@@ -214,21 +253,24 @@ async function handleDownload(conn, mek, from, sender, q, isDocument) {
         }
 
         await safeSendReaction(conn, from, mek, '✅');
-        logger.info(`[NovaX:SONG] Audio sent successfully.`);
+        logger.info(`[SONG] Audio sent successfully — mode: ${isDocument ? 'document' : 'audio'}`);
 
     } catch (e) {
-        logger.error(`[NovaX:ERROR] Command: ${isDocument ? 'dsong' : 'asong'} | Stage: download | Sender: ${sender} | Chat: ${from} | ${e.message}\n${e.stack}`);
+        logger.error(
+            `[SONG] Download failed — mode: ${isDocument ? 'dsong' : 'asong'} ` +
+            `| sender: ${sender} | chat: ${from} | ${e.message}`
+        );
         await safeSendReaction(conn, from, mek, '❌');
         return sendErr(conn, mek, from, `${ts(userLang, 'FAILED')} (${e.message})`);
 
     } finally {
-        // Always clean up temp file regardless of success or failure
+        // Always clean up the temp file — even when send fails
         cleanupAudio(downloadResult);
     }
 }
 
 // ============================================================
-// COMMAND: .asong <ytURL>  — Audio download
+// COMMAND: .asong <ytURL>  — Audio (playable)
 // ============================================================
 
 cmd({
@@ -240,7 +282,7 @@ cmd({
 });
 
 // ============================================================
-// COMMAND: .dsong <ytURL>  — Document download
+// COMMAND: .dsong <ytURL>  — Document (mp3 file)
 // ============================================================
 
 cmd({
