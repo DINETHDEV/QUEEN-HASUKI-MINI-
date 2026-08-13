@@ -73,8 +73,9 @@ function errorRedirect(res, message) {
 // Configure Passport Google Strategy
 // Only runs once when this module is first required.
 // ─────────────────────────────────────────────────────────────────────────────
-passport.use(new GoogleStrategy(
-    {
+if (config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET) {
+    passport.use(new GoogleStrategy(
+        {
         clientID:     config.GOOGLE_CLIENT_ID,
         clientSecret: config.GOOGLE_CLIENT_SECRET,
         callbackURL:  config.GOOGLE_CALLBACK_URL,
@@ -208,7 +209,8 @@ passport.use(new GoogleStrategy(
             return done(err);
         }
     }
-));
+    ));
+}
 
 // Passport requires serialize/deserialize even when not persisting sessions.
 // We use a minimal in-memory session only for the OAuth state handshake.
