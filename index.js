@@ -29,6 +29,19 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
+// ── Trust Proxy ────────────────────────────────────────────────────────────────
+// The app is deployed on Vercel (confirmed by vercel.json) which acts as a
+// single reverse proxy and injects X-Forwarded-For.
+// Setting trust proxy = 1 tells Express to trust the FIRST hop in the chain,
+// so req.ip resolves to the real client IP and express-rate-limit works correctly.
+//
+// We also apply this in development so that any local reverse-proxy setup
+// (ngrok, nginx, etc.) behaves consistently.
+//
+// We deliberately avoid `trust proxy = true` which would trust an unlimited
+// chain and could allow IP spoofing via X-Forwarded-For manipulation.
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 app.use(compression());

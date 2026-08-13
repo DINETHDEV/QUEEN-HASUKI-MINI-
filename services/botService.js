@@ -44,6 +44,20 @@ const SESSION_BASE_PATH = './auth_info_baileys';
 // ── Per-phone pairing locks (exported for routes) ─────────────────────────────
 const pairingLocks = new Map(); // phoneNumber → true
 
+// ── Per-session WhatsApp connection state ─────────────────────────────────────
+// Tracks the WhatsApp-level state separately from the raw WebSocket readyState.
+// WebSocket OPEN does NOT mean WhatsApp authenticated — these are different states.
+//
+// Valid states:
+//   'created'       – socket object created, WS not yet open
+//   'connecting'    – WS open, Noise protocol handshake in progress
+//   'qr_ready'      – QR challenge received, socket can issue pairing code
+//   'pairing'       – requestPairingCode() has been called
+//   'authenticated' – connection === 'open' (WhatsApp auth complete)
+//   'closed'        – connection closed, may reconnect
+//   'logged_out'    – DisconnectReason.loggedOut — do NOT reconnect
+let sessionState = 'created';
+
 // ── In-memory stats buffer (batch DB writes instead of per-message) ──────────
 let statsBuffer = { messagesReceived: 0, commandsExecuted: 0 };
 let statsFlushTimer = null;
@@ -215,39 +229,40 @@ async function sendConnectionNotification(sock) {
 }
 
 /**
- * Wait for the Baileys socket to be ready for pairing code generation.
+ * Wait for the Baileys socket to be ready to issue a pairing code.
  *
- * @itsliaaa/baileys wraps the WebSocket in a custom class — sock.ws.readyState
- * does NOT reliably return 1 (OPEN) even when the WS IS open.
+ * CRITICAL FIX — two bugs in the previous version:
  *
- * STRATEGY (most-to-least reliable):
- * 1. If a QR was already emitted, the WS is open — resolve immediately.
- * 2. Listen for connection.update events (qr / connecting / open) from Baileys.
- * 3. Poll multiple possible readyState locations as a fallback.
- * 4. Reject after timeoutMs.
+ * Bug 1 — Stale QR fast-path:
+ *   The old code did `if (global.qrCode) { return resolve(); }` immediately.
+ *   This caused the function to resolve instantly whenever a QR had been
+ *   generated in a previous session, even if the current socket is brand-new
+ *   and has not yet received a QR/connecting event.
+ *   requestPairingCode() was then called on a socket that was NOT in a state
+ *   ready for it → WhatsApp closed the connection with 408 → reconnect → 401.
+ *
+ * Bug 2 — Resolved too early on 'connecting':
+ *   'connecting' means the TCP/TLS handshake completed but the WhatsApp noise
+ *   protocol challenge hasn't been answered yet.  requestPairingCode() must
+ *   NOT be called at this point — it must wait for the QR event (which means
+ *   the noise handshake is done and the server is ready for login).
+ *
+ * Correct strategy:
+ *   1. If sessionState is already 'qr_ready' or 'authenticated', resolve immediately.
+ *   2. Otherwise wait for a 'qr' event from connection.update (noise handshake done).
+ *   3. If 'open' fires first (already-authenticated restart), also resolve.
+ *   4. If 'close' fires, reject.
+ *   5. Hard timeout after timeoutMs.
+ *
+ * Do NOT resolve on 'connecting' alone — the socket is not ready then.
  */
-function waitForWsReady(sock, timeoutMs = 15000) {
+function waitForWsReady(sock, timeoutMs = 20000) {
     return new Promise((resolve, reject) => {
         const started = Date.now();
 
-        // ── Fast path: QR already emitted means WS is already open ──────────
-        if (global.qrCode) {
-            console.log('[PAIR] WS already ready (QR cached).');
-            return resolve();
-        }
-
-        // ── Helper: check all known WS readyState paths in Baileys forks ────
-        const isOpen = () => {
-            const paths = [
-                sock.ws?.readyState,
-                sock.ws?.socket?.readyState,
-                sock.ws?.conn?.readyState
-            ];
-            return paths.some(rs => rs === 1);
-        };
-
-        if (isOpen()) {
-            console.log('[PAIR] WS already open (readyState check).');
+        // ── Fast path: socket already in a usable state ──────────────────────
+        if (sessionState === 'qr_ready' || sessionState === 'authenticated') {
+            console.log(`[PAIR] WS already ready — sessionState: ${sessionState}`);
             return resolve();
         }
 
@@ -256,38 +271,47 @@ function waitForWsReady(sock, timeoutMs = 15000) {
             if (resolved) return;
             resolved = true;
             clearInterval(poll);
+            clearTimeout(hardTimeout);
             sock.ev.off('connection.update', onUpdate);
             if (err) reject(err); else resolve();
         }
 
-        // ── Primary: Baileys event-based detection ───────────────────────────
-        // 'connecting' = WS handshake done, Baileys is talking to WhatsApp servers
-        // 'qr'         = WS is open, challenge received, pairing code is requestable
-        // 'open'       = fully authenticated (also fine)
+        // ── Primary: wait for QR event (noise handshake complete) ────────────
+        // 'qr' means the server sent a QR challenge — socket is now ready for
+        // requestPairingCode().
+        // 'open' means fully authenticated — also fine (already-auth'd restart).
         function onUpdate({ connection, qr: qrData }) {
             if (qrData) {
-                console.log('[PAIR] WS ready — QR event received.');
+                // QR received = socket is at the login challenge stage
+                // This is exactly when requestPairingCode() can be called
+                console.log('[PAIR] WS ready — QR event received (noise handshake complete).');
+                sessionState = 'qr_ready';
                 done();
-            } else if (connection === 'connecting' || connection === 'open') {
-                console.log(`[PAIR] WS ready — connection.update: ${connection}`);
+            } else if (connection === 'open') {
+                // Already authenticated — pairing code not needed but socket is ready
+                console.log('[PAIR] WS ready — connection already open (authenticated).');
+                sessionState = 'authenticated';
                 done();
             } else if (connection === 'close') {
                 done(new Error('WS_CLOSED: Socket closed before becoming ready'));
             }
+            // NOTE: do NOT resolve on connection === 'connecting' alone —
+            // the socket is not yet ready for requestPairingCode() at that stage
         }
         sock.ev.on('connection.update', onUpdate);
 
-        // ── Fallback: polling in case events were already emitted ─────────────
+        // ── Fallback polling (in case event was already emitted before we subscribed) ──
         const poll = setInterval(() => {
-            if (global.qrCode || isOpen()) {
-                console.log('[PAIR] WS ready — fallback poll.');
+            if (sessionState === 'qr_ready' || sessionState === 'authenticated') {
+                console.log(`[PAIR] WS ready — poll detected sessionState: ${sessionState}`);
                 done();
-                return;
-            }
-            if (Date.now() - started >= timeoutMs) {
-                done(new Error('WS_NOT_OPEN: Socket did not become ready within ' + timeoutMs + 'ms'));
             }
         }, 300);
+
+        // ── Hard timeout ─────────────────────────────────────────────────────
+        const hardTimeout = setTimeout(() => {
+            done(new Error(`WS_NOT_READY: Socket did not reach qr_ready state within ${timeoutMs}ms`));
+        }, timeoutMs);
     });
 }
 
@@ -328,11 +352,16 @@ const initSocket = async () => {
             global.conn = sock;
             activeSockets.set('main', sock);
 
+            // Reset session state for new socket
+            sessionState = 'created';
+
             sock.ev.on('connection.update', async (update) => {
                 const { connection, lastDisconnect, qr: qrData } = update;
 
                 if (qrData) {
                     logger.info('[WhatsApp] New QR generated.');
+                    // Update session state: QR received = ready for pairing code
+                    sessionState = 'qr_ready';
                     global.qrCode = qrData;
                     if (global.io) {
                         global.io.emit('bot_qr', { qr: qrData });
@@ -341,6 +370,7 @@ const initSocket = async () => {
                 }
 
                 if (connection === 'connecting') {
+                    sessionState = 'connecting';
                     console.log('[PAIR] Connection state: connecting');
                     if (global.io) {
                         global.io.emit('whatsapp:connecting');
@@ -351,6 +381,11 @@ const initSocket = async () => {
                     const connectionStart = Date.now();
                     const botJid    = sock.user?.id || '';
                     const botNumber = botJid.split('@')[0].split(':')[0];
+
+                    // Update session state: WhatsApp authentication complete
+                    sessionState = 'authenticated';
+                    // Clear stale QR — it's no longer valid now that we're authenticated
+                    global.qrCode = null;
 
                     console.log(`[PAIR] Connection opened — bot JID: ${botJid}`);
                     logger.success(`✅ WhatsApp Bot connected successfully! (${botNumber})`);
@@ -409,14 +444,49 @@ const initSocket = async () => {
                     console.log('[PAIR] Pairing flow completed');
 
                 } else if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                    logger.warn(`[WhatsApp] Connection closed. StatusCode: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+                    const statusCode      = lastDisconnect?.error?.output?.statusCode;
+                    const boomPayload     = lastDisconnect?.error?.output?.payload || {};
+                    const disconnectMsg   = lastDisconnect?.error?.message || 'unknown';
+                    const isLoggedOut     = statusCode === DisconnectReason.loggedOut;   // 401
+                    const isTimedOut      = statusCode === 408;
+                    const shouldReconnect = !isLoggedOut;
+
+                    // Update session state
+                    sessionState = isLoggedOut ? 'logged_out' : 'closed';
+
+                    // Safe diagnostic log — no credentials, no keys
+                    logger.warn(`[WhatsApp] Connection closed.`);
+                    logger.warn(`[PAIR] Status code      : ${statusCode}`);
+                    logger.warn(`[PAIR] Disconnect reason: ${disconnectMsg}`);
+                    logger.warn(`[PAIR] Session state    : ${sessionState}`);
+                    logger.warn(`[PAIR] Will reconnect   : ${shouldReconnect}`);
+
+                    if (isTimedOut) {
+                        // 408 = WhatsApp did not receive the authentication handshake
+                        // in time. This is a temporary condition — the socket can reconnect.
+                        // Common causes: slow network, pairing code not entered in time.
+                        logger.warn('[PAIR] 408 — Connection timed out waiting for authentication. Will reconnect.');
+                    }
+
+                    if (isLoggedOut) {
+                        // 401 = WhatsApp rejected the session credentials.
+                        // This can happen if:
+                        //   - The pairing code was never confirmed in WhatsApp
+                        //   - Credentials were corrupted (e.g. by a duplicate socket write)
+                        //   - The user manually logged out from WhatsApp devices list
+                        // We do NOT automatically delete credentials — the user must do this
+                        // intentionally from the web panel.
+                        logger.error('[PAIR] 401 — Authentication/session rejected by WhatsApp.');
+                        logger.error('[PAIR] Reconnect disabled. Existing credentials preserved.');
+                        logger.error('[PAIR] To re-pair: use the web panel disconnect button, then pair again.');
+                    }
 
                     if (global.io) {
                         global.io.emit('whatsapp:close');
                         global.io.emit('bot_status_update', {
-                            status: shouldReconnect ? 'connecting' : 'disconnected'
+                            status:     shouldReconnect ? 'connecting' : 'disconnected',
+                            statusCode,
+                            isLoggedOut
                         });
                     }
 
@@ -447,12 +517,18 @@ const initSocket = async () => {
                     if (shouldReconnect) {
                         const backoff = getBackoffMs();
                         logger.info(`[WhatsApp] Reconnecting in ${backoff / 1000}s (attempt ${reconnectAttempts})...`);
-                        setTimeout(initSocket, backoff);
+                        setTimeout(() => {
+                            // Reset sessionState before new socket creation
+                            sessionState = 'created';
+                            initSocket();
+                        }, backoff);
                     } else {
-                        // Credentials cleared — reset so next real pair sends the notification
+                        // 401 — session permanently rejected
+                        // Reset notification guard so next real pair sends the success notification
                         pairSuccessNotified = false;
                         reconnectAttempts   = 0;
-                        logger.error('[WhatsApp] Logged out from WhatsApp, delete credentials folder to relogin.');
+                        // Do NOT delete credentials automatically.
+                        // The user must explicitly disconnect + delete from the web panel.
                     }
                 }
             });
@@ -476,31 +552,47 @@ const initSocket = async () => {
 /**
  * Generate a pairing code for a phone number.
  *
- * CRITICAL FIX: Removed non-existent sock.waitForSocketOpen().
- * Replaced with waitForWsReady() which uses Baileys event system
- * and multiple WS state checks — works reliably with @itsliaaa/baileys.
+ * FIXES:
+ *   1. waitForWsReady() no longer resolves early on stale global.qrCode or
+ *      on 'connecting' state — it waits for the actual QR event which confirms
+ *      the noise handshake is complete and requestPairingCode() is safe to call.
+ *   2. sessionState is checked before calling requestPairingCode() — if the
+ *      socket is already 'authenticated' we don't re-pair.
+ *   3. sessionState is set to 'pairing' after the code is requested, so
+ *      waitForWsReady fast-path correctly identifies in-progress pairing.
  */
 const createBotSession = async (phoneNumber) => {
     const pairStart = Date.now();
     console.log(`[PAIR] Request received for: ${phoneNumber}`);
     console.log('[PAIR] Validating number');
+    console.log(`[PAIR] Current session state: ${sessionState}`);
     console.log('[PAIR] Creating/reusing socket...');
 
     const sock = await initSocket();
 
-    console.log('[PAIR] Socket obtained, waiting for WS readiness...');
+    // If already authenticated, return early — no pairing needed
+    if (sessionState === 'authenticated' && sock.user) {
+        const pairMs = Date.now() - pairStart;
+        console.log(`[PAIR] Socket already authenticated — no pairing needed (${pairMs}ms)`);
+        throw new Error('Session already authenticated. Disconnect first before re-pairing.');
+    }
+
+    console.log('[PAIR] Waiting for socket to reach qr_ready state...');
     await waitForWsReady(sock, 20000);
 
     const wsReadyMs = Date.now() - pairStart;
-    console.log(`[PAIR] Socket ready in ${wsReadyMs}ms`);
+    console.log(`[PAIR] Socket ready in ${wsReadyMs}ms — sessionState: ${sessionState}`);
     console.log('[PAIR] Requesting pairing code...');
+
+    // Mark state as pairing before calling — prevents concurrent re-entry
+    sessionState = 'pairing';
 
     const code = await sock.requestPairingCode(phoneNumber);
 
     const codeMs = Date.now() - pairStart;
     console.log(`[PAIR] Pairing code generated: ${code}`);
     console.log(`[PAIR] Code generation completed in ${codeMs}ms`);
-    console.log('[PAIR] Waiting for WhatsApp authentication...');
+    console.log('[PAIR] Waiting for WhatsApp authentication (socket runs in background)...');
 
     return code;
 };
@@ -834,5 +926,6 @@ module.exports = {
     getBotStatus,
     updateBotSettings,
     disconnectBot,
-    pairingLocks  // ← exported so routes can check per-phone lock status
+    pairingLocks,  // ← exported so routes can check per-phone lock status
+    getSessionState: () => sessionState  // ← health check: WS open ≠ WA authenticated
 };

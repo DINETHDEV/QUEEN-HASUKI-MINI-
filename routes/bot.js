@@ -12,7 +12,8 @@ const { authenticateToken } = require('../middleware/auth');
 const { botLimiter } = require('../middleware/rateLimiter');
 const _botService = require('../services/botService');
 const { initSocket, createBotSession, getBotStatus, updateBotSettings } = _botService;
-const pairingLocks = _botService.pairingLocks || new Map(); // fallback prevents crash if export missing
+const pairingLocks = _botService.pairingLocks || new Map();
+const getSessionState = _botService.getSessionState || (() => 'unknown');
 const { getMongoStatus } = require('../database/connection');
 const pluginManager = require('../lib/pluginManager');
 const dbLib = require('../lib/database');
@@ -39,7 +40,14 @@ router.get('/status', async (req, res) => {
                 rss: (mem.rss / 1024 / 1024).toFixed(2) + ' MB',
                 heapUsed: (mem.heapUsed / 1024 / 1024).toFixed(2) + ' MB'
             },
-            plugins: pluginStats
+            plugins: pluginStats,
+            // Health check: distinguish WS open from WhatsApp authenticated
+            whatsapp: {
+                sessionState:    getSessionState(),   // 'created' | 'connecting' | 'qr_ready' | 'pairing' | 'authenticated' | 'closed' | 'logged_out'
+                wsOpen:          !!(global.conn),
+                authenticated:   getSessionState() === 'authenticated',
+                user:            global.conn?.user?.id ? global.conn.user.id.split('@')[0].split(':')[0] : null
+            }
         });
     } catch (error) {
         res.status(500).json({ success: false, message: 'Failed to fetch status' });
